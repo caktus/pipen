@@ -137,7 +137,31 @@ The pod template (`devenv/templates/pod.yaml`) pulls
 CLI sends `latest` by default, or the tag you pass with `pipen up --tag`.
 There is no in-cluster registry and no image build on a node anymore.
 
+### The chart repository (GitHub Pages)
+
+The `dev-namespace` chart publishes to `https://caktus.github.io/pipen`.
+A GitHub Actions workflow (`.github/workflows/publish-chart.yml`) runs
+chart-releaser on every merge to main. It creates a release for each new
+chart version and pushes the package and `index.yaml` to the `gh-pages`
+branch, which GitHub Pages serves. The release trigger is a `version`
+bump in `charts/dev-namespace/Chart.yaml`. A chart change without a bump
+publishes nothing and fails `verify.yml`. One-time setup: set the Pages
+source to the `gh-pages` branch in the repo settings.
+
 ### 2. Bootstrap a developer
+
+Install the chart from the chart repository:
+
+```sh
+helm repo add pipen https://caktus.github.io/pipen
+helm repo update pipen
+helm install <dev> pipen/dev-namespace --version <version> \
+  --set dev=<dev> \
+  --set 'authorizedKeys[0]=<ssh public key 1>' \
+  --set 'authorizedKeys[1]=<ssh public key 2>'
+```
+
+Or install by path from a checkout:
 
 ```sh
 helm install <dev> charts/dev-namespace \
