@@ -73,6 +73,27 @@ jobs:
       - name: CLI smoke
         run: uv run pipen --help
         working-directory: cli
+      - name: CLI unit tests
+        run: uv run python -m unittest discover -s tests
+        working-directory: cli
+
+  go:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+        working-directory: operator
+      - name: go vet + build + test
+        working-directory: operator
+        run: |
+          go vet ./...
+          go build ./...
+          go test ./...
 
   image:
     runs-on: ubuntu-latest
@@ -88,3 +109,11 @@ jobs:
           load: true
           cache-from: type=gha,scope=herdr-image
           cache-to: type=gha,scope=herdr-image,mode=max
+      - name: Build the operator image
+        uses: docker/build-push-action@v6
+        with:
+          context: operator
+          tags: pipen-operator:ci
+          load: true
+          cache-from: type=gha,scope=pipen-operator-image
+          cache-to: type=gha,scope=pipen-operator-image,mode=max
