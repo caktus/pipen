@@ -13,6 +13,8 @@ Verbs:
   up <name>    Create the home PVC (if absent), the env ConfigMap, the kata
                pod and the tailnet-exposed Service; wait for pod ready and
                the operator-assigned MagicDNS hostname; print the ssh line.
+               The pod pulls ghcr.io/caktus/pipen, tag `latest` by default,
+               or the tag you pass with --tag.
   ssh <name>   Resolve the hostname from the live Service status and ssh in.
   down <name>  Delete pod + Service + env ConfigMap. The PVC and its data
                remain (admin wipe: kubectl -n <ns> delete pvc <name>-home).
@@ -54,6 +56,7 @@ CONFIG_PATH = os.environ.get(
 )
 TOKEN_RE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 def die(msg: str, code: int = 1):
@@ -297,9 +300,9 @@ def cmd_up(args, cfg, api) -> int:
     if status != 200:
         die(f"cannot read herdr-dev-{dev}: HTTP {status} {body}")
     cm_data = body.get("data") or {}
-    image_tag = cm_data.get("image_tag")
-    if not image_tag:
-        die(f"herdr-dev-{dev} has no image_tag — the admin must re-run the bootstrap")
+    if not TAG_RE.match(args.tag):
+        die(f"invalid image tag {args.tag!r} (docker tag charset, max 128 chars)")
+    image_tag = args.tag
     env_config = {
         k: cm_data[k]
         for k in ("models.json", "settings.json", "litellm_key")
@@ -337,7 +340,7 @@ def cmd_up(args, cfg, api) -> int:
         status, body = api.request("POST", api.ns_path(ns, "/pods"), pod)
         if status not in (200, 201):
             die(f"pod create failed: HTTP {status} {body}")
-        print(f"pipen: created pod env-{env} (image tag {image_tag})")
+        print(f"pipen: created pod env-{env} (image ghcr.io/caktus/pipen:{image_tag})")
 
     status, _ = api.request("GET", api.ns_path(ns, f"/services/{env}"))
     if status == 200:
@@ -460,6 +463,11 @@ def main() -> int:
     )
     p_up.add_argument("name")
     p_up.add_argument("--size", default="10Gi", help="home PVC size (default: 10Gi)")
+    p_up.add_argument(
+        "--tag",
+        default="latest",
+        help="image tag on ghcr.io/caktus/pipen (default: latest; pin a dated tag like 20261121-pi1.6.0)",
+    )
     p_up.add_argument("--cpu", default="4", help="cpu request/limit (default: 4)")
     p_up.add_argument(
         "--memory", default="8Gi", help="memory request/limit (default: 8Gi)"

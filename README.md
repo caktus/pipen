@@ -12,8 +12,8 @@ restarts. You reach the pen by name on the tailnet. The tailnet is the
 Tailscale private network.
 
 This repo holds the general toolchain. Your cluster's private deployment repo
-holds the cluster-specific parts: storage nodes, image registry, litellm keys,
-and tailnet domain.
+holds the cluster-specific parts: storage nodes, litellm keys, and
+tailnet domain.
 
 - `devenv/` holds the pen definition: the dev image (Dockerfile, entrypoint,
   docker daemon configuration) and the pod/Service templates that the CLI
@@ -75,12 +75,15 @@ An admin bootstraps you once (see Admins) and gives you the
 3. Work with pens:
 
    ```sh
-   pipen up myenv          # first start pulls the image on the storage node
+   pipen up myenv          # pulls the latest dev image from GHCR
    pipen ssh myenv         # or: ssh <you>@<hostname> (hostname printed by up)
    pipen ls                # envs, pod state, nodes, hostnames
    pipen logs myenv        # pod logs (entrypoint + sshd)
    pipen down myenv        # tears down pod + Service; the PVC survives
    ```
+
+   The pen starts on the `latest` image (see Admins, step 1). To pin
+   a specific build, pass its tag: `pipen up myenv --tag 20261121-pi1.6.0`
 
    `pipen up myenv` run as `<you>` creates env/service **`<you>-myenv`**. The
    name carries your developer or namespace as a prefix. The CLI adds the
@@ -108,26 +111,31 @@ An admin bootstraps you once (see Admins) and gives you the
 `pi update` works inside a pen. The image bakes pi into its own npm prefix
 (`/opt/pi`). That prefix is writable by your user, so the in-place
 `npm install` for the self-update works. The update lives on the temporary
-kata rootfs. A pod recreation resets pi to the image-baked version. To pin a
-version, bump it in `devenv/Dockerfile`, then rebuild and re-push the image.
+kata rootfs. A pod recreation resets pi to the image-baked version. To change
+the baked pi version for everyone, edit `devenv/Dockerfile`. The nightly build picks the change up. To run an older build, pin its tag with
+`pipen up --tag <tag>`.
 
 ## Admins
 
-### 1. Build and push the dev image
+### 1. The dev image (GHCR, built nightly)
 
-Run this on a host that has docker:
+The dev image builds in this repo's GitHub Actions workflow
+(`.github/workflows/publish.yml`) on every merge to main, nightly at 04:00
+UTC, and on manual dispatch (Actions tab). It pushes to the GHCR package
+`ghcr.io/caktus/pipen`. Tags are
+`YYYYMMDD-pi<pi-version>` (for example `20261121-pi1.6.0`) plus `latest`.
+The version part comes from the pi-dev the image actually carries. A new tag
+appears only when the image content changed. The workflow keeps the 14 newest
+date tags and deletes the rest.
 
-```sh
-docker build -t <registry>/herdr/dev:<date-tag> devenv/
-docker push <registry>/herdr/dev:<date-tag>
-```
+One-time setup: open the package page for `caktus/pipen` and set its
+visibility to **public**. GitHub creates packages pushed this way as private
+by default, and the pen pods pull anonymously.
 
-The bootstrap records the date-based tag in the dev ConfigMap. Make sure that
-the cluster nodes can pull that image. The pod template
-(`devenv/templates/pod.yaml`) currently pins
-`localhost:32000/herdr/dev:{{ image_tag }}`. That is the in-cluster registry.
-It is reachable from every node through its NodePort. If the image lives
-elsewhere, point the template at it.
+The pod template (`devenv/templates/pod.yaml`) pulls
+`ghcr.io/caktus/pipen:{{ image_tag }}` with `imagePullPolicy: Always`. The
+CLI sends `latest` by default, or the tag you pass with `pipen up --tag`.
+There is no in-cluster registry and no image build on a node anymore.
 
 ### 2. Bootstrap a developer
 
@@ -156,7 +164,6 @@ sure that it is filled before you read it.
 The ConfigMap `herdr-dev-<dev>` (namespace `<dev>`) holds the runtime
 configuration that the CLI injects into each pen:
 
-- `image_tag` (from step 1)
 - The rendered pi configuration: `models.json` (litellm baseUrl rewritten to
   the cluster-internal address) and `settings.json`
 - The per-developer litellm key (`litellm_key`)
