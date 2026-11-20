@@ -2,13 +2,13 @@
 id: PI-003
 github_issue: 3
 github_url: https://github.com/caktus/pipen/issues/3
-last_synced: "2026-11-20T15:37:54.641844+00:00"
-synced_hash: 0b22c22b2035611a6a19d98eed5c248fb13e50cb6d96d8954e04b918ed203c59
+last_synced: "2026-11-20T15:58:38.473723+00:00"
+synced_hash: b951c75103e56660da337e5d250de0841dc0ad3f6d938ff73bcacda2b258d4f8
 title: Nightly herdr image builds on GitHub Actions
 type: Task
 assignee: "@me"
 labels:
-  - phase/draft
+  - phase/in-progress
 context:
   relates_to: []
 ---
@@ -19,13 +19,13 @@ The dev toolchain image is currently built on a cluster node by the private depl
 
 ### To Do
 
-- Add a GHA workflow: nightly timer + manual dispatch, build (single-platform, no layer cache), layer-digest-compare against current `latest`, push `YYYYMMDD` + move `latest` only on content change, prune date tags beyond a rolling window
+- Add a GHA workflow: nightly timer + manual dispatch, build (single-platform, no layer cache), layer-digest-compare against current `latest`, push `YYYYMMDD-pi<pi-dev-version>` (pi version read from the pi-dev install at build time) + move `latest` only on content change, prune old tags beyond a rolling window
 - Consumer side (private deployment repo): point the pod template at `ghcr.io/caktus/pipen` (`imagePullPolicy: Always` + `latest` default, `--tag` pin), drop the local registry and the playbook's image build tag
 
 ## AC
 
-- [ ] The nightly workflow pushes a new `YYYYMMDD` tag and moves `latest` only when the built image's content changed; on a quiet night it pushes nothing; manual dispatch works; old date tags are pruned (rolling 14)
-- [ ] `pipen up` with no flag starts the env on the latest image as of pod start (pull-always); `pipen up --tag <date-tag>` pins that tag; both verified live
+- [ ] The nightly workflow pushes a new `YYYYMMDD-pi<pi-dev-version>` tag and moves `latest` only when the built image's content changed; on a quiet night it pushes nothing; manual dispatch works; old tags are pruned (rolling 14)
+- [ ] `pipen up` with no flag starts the env on the latest image as of pod start (pull-always); `pipen up --tag <tag>` pins a versioned tag; both verified live
 - [ ] The in-cluster registry is gone and no playbook path builds images locally; README.md documents the new flow and pinning
 
 ## Related tickets

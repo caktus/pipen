@@ -22,8 +22,10 @@ spec:
     openebs.io/engine: mayastor
   containers:
     - name: env
-      image: localhost:32000/herdr/dev:{{ image_tag }}
-      imagePullPolicy: IfNotPresent
+      # GHCR public package (anonymous pull), built nightly by this repo's
+      # GHA publish workflow — see README.md (Admins, step 1)
+      image: ghcr.io/caktus/pipen:{{ image_tag }}
+      imagePullPolicy: Always
       securityContext:
         privileged: true # dockerd inside the kata guest
       env:

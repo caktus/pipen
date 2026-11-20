@@ -1,0 +1,113 @@
+# Image publish for ghcr.io/caktus/pipen (public package, anonymous pull).
+#
+# On every merge to main, nightly, and on manual dispatch: build devenv/
+# with no cache, compare the layer digests against the current :latest,
+# and push only when the content changed. Pushed tags:
+# YYYYMMDD-pi<pi-version> and :latest. The workflow keeps the 14 newest
+# date tags and deletes the rest. See README.md (Admins, step 1).
+#
+# No pull_request trigger: a PR run must not publish unmerged code.
+#
+# One-time setup: set the package visibility to public in the GitHub UI.
+# GitHub creates packages pushed this way as private by default, and the
+# pen pods pull anonymously.
+
+name: publish
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 4 * * *" # 04:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      IMAGE: ghcr.io/caktus/pipen
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the dev toolchain image (no cache)
+        run: |
+          # --no-cache: rebuild every layer so the digests reflect the real
+          # upstream content (apt, npm, and herdr all track latest), not a
+          # cached layer from an older run
+          docker buildx build --no-cache --load \
+            -t pipen-herdr-dev:candidate devenv/
+
+      - name: Build the tag from the date and the pi-dev version
+        run: |
+          # the version comes from the built image, so the tag always names
+          # the pi-dev that the image actually carries
+          version=$(docker run --rm --entrypoint pi pipen-herdr-dev:candidate --version \
+            | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1)
+          if [ -z "$version" ]; then
+            echo "could not read the pi version from the image" >&2
+            exit 1
+          fi
+          echo "tag=$(date -u +%Y%m%d)-pi${version}" >> "$GITHUB_ENV"
+          echo "tag: $(date -u +%Y%m%d)-pi${version}"
+
+      - name: Compare layer digests against the current latest
+        run: |
+          new=$(docker inspect --format '{{join .RootFS.Layers "\n"}}' pipen-herdr-dev:candidate)
+          if docker pull -q "${IMAGE}:latest"; then
+            cur=$(docker inspect --format '{{join .RootFS.Layers "\n"}}' "${IMAGE}:latest")
+          else
+            cur=""
+            echo "no current ${IMAGE}:latest (first run)"
+          fi
+          echo "---- built ----"; echo "$new"
+          echo "---- current ----"; echo "$cur"
+          if [ -n "$cur" ] && [ "$new" = "$cur" ]; then
+            echo "image unchanged — nothing to push"
+            echo "changed=false" >> "$GITHUB_ENV"
+          else
+            echo "changed=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Login to GHCR
+        if: env.changed == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push the date tag and latest
+        if: env.changed == 'true'
+        run: |
+          docker tag pipen-herdr-dev:candidate "${IMAGE}:${tag}"
+          docker tag pipen-herdr-dev:candidate "${IMAGE}:latest"
+          docker push "${IMAGE}:${tag}"
+          docker push "${IMAGE}:latest"
+
+      - name: Prune date tags (keep the 14 newest)
+        if: env.changed == 'true'
+        run: |
+          # crane talks the registry API directly: list the tags, keep the
+          # 14 newest date tags, delete the rest. :latest never matches
+          # the date-tag pattern, so it is never pruned.
+          curl -fsSL \
+            "https://github.com/google/go-containerregistry/releases/download/v0.20.6/go-containerregistry_Linux_x86_64.tar.gz" \
+            | tar xz crane
+          crane auth login ghcr.io -u "${GITHUB_ACTOR}" -p "${GITHUB_TOKEN}"
+          crane ls "${IMAGE}" \
+            | grep -E '^[0-9]{8}-pi' \
+            | sort -r \
+            | tail -n +15 \
+            | while read -r old; do
+                echo "deleting ${IMAGE}:${old}"
+                crane del "${IMAGE}:${old}"
+              done
