@@ -1,6 +1,6 @@
 module github.com/caktus/pipen/operator
 
-go 1.27.0
+go 1.24.0
 
 require (
 	k8s.io/api v0.33.0
