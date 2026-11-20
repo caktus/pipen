@@ -152,6 +152,7 @@ activemq-data/
 # Environments
 .env
 .envrc
+.gh-token
 .venv
 env/
 venv/

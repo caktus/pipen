@@ -1,0 +1,90 @@
+# CI for pipen: the full pre-commit hook suite, the dev-namespace chart
+# (helm lint + template render + client-side parse), the pipen CLI
+# (lockfile check + smoke), and a full image build of devenv/ so a broken
+# toolchain build is caught before it reaches the cluster.
+
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Install pre-commit
+        run: uv tool install pre-commit
+      - name: Run all hooks on all files
+        run: pre-commit run --all-files
+
+  chart:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install helm
+        run: |
+          helm_version=3.16.4
+          curl -fsSL "https://get.helm.sh/helm-v${helm_version}-linux-amd64.tar.gz" | tar xz
+          sudo install linux-amd64/helm /usr/local/bin/helm
+      - name: Lint the dev-namespace chart
+        run: helm lint charts/dev-namespace --set dev=ci-checker
+      - name: Template the chart and parse the rendered manifests
+        run: |
+          # offline: no cluster for kubectl --dry-run, so parse the rendered
+          # output as multi-doc YAML and check the object count
+          helm template ci-checker charts/dev-namespace \
+            --set dev=ci-checker \
+            --set 'authorizedKeys[0]=ssh-ed25519 AAAACIKEY ci-checker' \
+            | python3 -c '
+          import sys, yaml
+          docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+          assert len(docs) == 6, f"expected 6 manifests, got {len(docs)}"
+          print(f"{len(docs)} manifests OK: " + ", ".join(d["kind"] for d in docs))
+          '
+      - name: Missing dev must fail the render
+        run: |
+          # capture first: the step shell runs with pipefail, so a failing
+          # `helm template | grep` pipeline would fail on helm's exit code
+          out=$(helm template broken charts/dev-namespace 2>&1 || true)
+          grep -q 'must be an RFC 1123 name' <<<"$out"
+
+  cli:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: uv lockfile check + install
+        run: uv sync --locked
+        working-directory: cli
+      - name: CLI smoke
+        run: uv run pipen --help
+        working-directory: cli
+
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the dev toolchain image
+        uses: docker/build-push-action@v6
+        with:
+          context: devenv
+          tags: pipen-herdr-dev:ci
+          load: true
+          cache-from: type=gha,scope=herdr-image
+          cache-to: type=gha,scope=herdr-image,mode=max

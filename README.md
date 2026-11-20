@@ -1,2 +1,218 @@
 # pipen
-Orchestration for pi.dev + Herdr sandboxes ("pens") in Kubernetes.
+
+pipen runs isolated development environments on a Kubernetes cluster. Each
+environment is a pen: one machine per project, up with one command.
+
+Run `pipen up <name>`, then run `ssh <you>@<hostname>`. Each pen is a kata pod
+on a Mayastor storage node. kata is a virtual machine runtime. The pen runs an
+Ubuntu 26.04 guest. The guest has the full development toolchain, docker, and
+pi.dev. pi.dev connects to the litellm proxy that runs inside the cluster.
+litellm is a model routing proxy. Your home directory stays across pod
+restarts. You reach the pen by name on the tailnet. The tailnet is the
+Tailscale private network.
+
+This repo holds the general toolchain. Your cluster's private deployment repo
+holds the cluster-specific parts: storage nodes, image registry, litellm keys,
+and tailnet domain.
+
+- `devenv/` holds the pen definition: the dev image (Dockerfile, entrypoint,
+  docker daemon configuration) and the pod/Service templates that the CLI
+  renders
+- `cli/` holds the developer CLI (`pipen.py`). It installs as the `pipen`
+  command
+- `charts/dev-namespace/` is a mini Helm chart. It provisions one developer
+  namespace: Namespace, ServiceAccount, namespace-scoped Role/RoleBinding, a
+  ServiceAccount token, and the ssh-key Secret
+
+## What a pen gives you
+
+- A kata pod with 4 CPU and 8 GiB memory. It runs on the Mayastor storage
+  nodes (label `openebs.io/engine=mayastor`). Only those nodes can attach the
+  home volume
+- Ubuntu 26.04 with the standard dev toolchain: `git curl build-essential htop
+docker.io direnv npm unzip`, uv, fnm, Node 24, and
+  `@earendil-works/pi-coding-agent` (`pi`)
+- docker inside the pen (dockerd in a privileged kata guest)
+- pi.dev against the cluster-internal litellm proxy
+  (`http://litellm.litellm.svc.cluster.local:4000`). The guest needs no
+  tailnet DNS. Your per-developer key lives in `~/.litellm_key`
+- A persistent `/home` on a mirrored `mayastor-2` PVC (10 GiB by default). It
+  survives pod deletion. It re-attaches on either storage node
+- ssh to the pen over the tailnet. The Tailscale operator gives each pen a
+  MagicDNS hostname. The operator can add a suffix, for example
+  `<dev>-<name>-1`. The CLI always prints the hostname that the operator
+  assigned
+- Environment names carry your developer or namespace as a prefix. The CLI
+  adds the prefix when it is missing. Hostnames do not collide across
+  developers
+
+## Developers
+
+An admin bootstraps you once (see Admins) and gives you the
+`.herdr-<you>.yaml` file.
+
+1. Install the file:
+
+   ```sh
+   mkdir -p ~/.config/pipen
+   cp .herdr-<you>.yaml ~/.config/pipen/config.yaml   # 0600
+   ```
+
+2. Install the CLI. Use a checkout of this repo:
+
+   ```sh
+   uv run cli/pipen.py --help
+   ```
+
+   Or install it. `up` also needs the templates, so point `PIPEN_TEMPLATES` at
+   a checkout:
+
+   ```sh
+   uv tool install <checkout>/cli
+   export PIPEN_TEMPLATES=<checkout>/devenv/templates   # for `pipen up`
+   ```
+
+3. Work with pens:
+
+   ```sh
+   pipen up myenv          # first start pulls the image on the storage node
+   pipen ssh myenv         # or: ssh <you>@<hostname> (hostname printed by up)
+   pipen ls                # envs, pod state, nodes, hostnames
+   pipen logs myenv        # pod logs (entrypoint + sshd)
+   pipen down myenv        # tears down pod + Service; the PVC survives
+   ```
+
+   `pipen up myenv` run as `<you>` creates env/service **`<you>-myenv`**. The
+   name carries your developer or namespace as a prefix. The CLI adds the
+   prefix when it is missing. The pen is reachable at
+   `<you>-myenv.<tailnet-domain>`. The operator can add a suffix (for example
+   `<you>-myenv-1`). The CLI prints the assigned hostname.
+   `pipen down myenv` and `pipen down <you>-myenv` target the same pen. A name
+   that starts with someone else's prefix still gets yours.
+
+### What stays, and what does not
+
+- `/home/<you>` lives on the mirrored PVC. It survives `pipen down` + `up`, pod
+  deletion, and node moves. The `WaitForFirstConsumer` volume re-attaches on
+  the storage node where the new pod lands
+- Everything else lives on the temporary kata rootfs. In particular, docker
+  images and containers that you build inside a pen vanish on every pod
+  recreation. The data root for dockerd is `/var/lib/docker`, on the rootfs.
+  Re-running `up` restores your home, not your docker state
+- An admin wipes the home data for a pen (see Admins). `pipen down` never
+  touches the PVC. The role for your token holds no pvc delete. That role is
+  enforced when the cluster runs `--authorization-mode=RBAC`
+
+### Updating pi inside a pen
+
+`pi update` works inside a pen. The image bakes pi into its own npm prefix
+(`/opt/pi`). That prefix is writable by your user, so the in-place
+`npm install` for the self-update works. The update lives on the temporary
+kata rootfs. A pod recreation resets pi to the image-baked version. To pin a
+version, bump it in `devenv/Dockerfile`, then rebuild and re-push the image.
+
+## Admins
+
+### 1. Build and push the dev image
+
+Run this on a host that has docker:
+
+```sh
+docker build -t <registry>/herdr/dev:<date-tag> devenv/
+docker push <registry>/herdr/dev:<date-tag>
+```
+
+The bootstrap records the date-based tag in the dev ConfigMap. Make sure that
+the cluster nodes can pull that image. The pod template
+(`devenv/templates/pod.yaml`) currently pins
+`localhost:32000/herdr/dev:{{ image_tag }}`. That is the in-cluster registry.
+It is reachable from every node through its NodePort. If the image lives
+elsewhere, point the template at it.
+
+### 2. Bootstrap a developer
+
+```sh
+helm install <dev> charts/dev-namespace \
+  --set dev=<dev> \
+  --set 'authorizedKeys[0]=<ssh public key 1>' \
+  --set 'authorizedKeys[1]=<ssh public key 2>'
+```
+
+This creates, in namespace `<dev>` (label `herdr.dev/owner`):
+
+- ServiceAccount `deploy` and a namespace-scoped Role/RoleBinding (CRUD on
+  `pods`/`services`/`configmaps`/`secrets`, `get/list/create/watch` on
+  `persistentvolumeclaims` and **no delete**. Deleting a PVC is the
+  admin-only data wipe. The role holds nothing cluster-wide and nothing in
+  other namespaces)
+- The explicit ServiceAccount token Secret `deploy-token`
+- The Secret `herdr-dev-<dev>` (the ssh keys)
+
+The token controller fills `deploy-token` `data.token` after a delay. Make
+sure that it is filled before you read it.
+
+### 3. Create the dev ConfigMap
+
+The ConfigMap `herdr-dev-<dev>` (namespace `<dev>`) holds the runtime
+configuration that the CLI injects into each pen:
+
+- `image_tag` (from step 1)
+- The rendered pi configuration: `models.json` (litellm baseUrl rewritten to
+  the cluster-internal address) and `settings.json`
+- The per-developer litellm key (`litellm_key`)
+
+The rendering and key management belong to your cluster tooling (the private
+deployment repo).
+
+### 4. Hand the CLI configuration to the developer
+
+Read the token and write `.herdr-<dev>.yaml` (0600, never committed):
+
+```sh
+kubectl -n <dev> get secret deploy-token -o jsonpath='{.data.token}' | base64 -d
+```
+
+```yaml
+api_base: https://<cluster-api-host>:<port> # e.g. the tailnet API address
+namespace: <dev>
+dev_user: <dev>
+tailnet_domain: <tailnet-domain>
+token: <sa-token>
+```
+
+### Revoke a developer
+
+1. Revoke the litellm key (litellm console or `/key/delete`)
+2. Run `helm uninstall <dev>` (removes the chart's namespace, RBAC, and
+   secrets)
+3. Delete `.herdr-<dev>.yaml`
+4. The home PVCs (and their data) go with the namespace when you delete it.
+   Run `kubectl delete ns <dev>`. This deletes the home data
+
+### Wipe the home data for one pen
+
+```sh
+kubectl -n <dev> delete pvc <pen>-home     # frees the mirrored volume
+```
+
+## Capacity
+
+Your storage sets the ceiling for pen count. At 10 GiB mirrored per pen, a
+`mayastor-2`-class tier with ~2 TiB usable holds about 70+ pens. Make sure
+that the DiskPool has free capacity before you provision at scale.
+
+## CLI notes
+
+- The CLI talks to the cluster API at `api_base` with the namespace-scoped
+  ServiceAccount token. It turns off TLS certificate verification for that
+  hop. The API server certificate carries no tailnet SAN. Token
+  authentication over the private tailnet is the documented posture
+- Every verb that the CLI uses is granted by the bootstrap role, and nothing
+  more. That scoping works when the cluster runs
+  `--authorization-mode=RBAC`. On an AlwaysAllow cluster, the cluster itself
+  is the boundary. In particular, the role for the token holds no pvc
+  delete. The data wipe stays with the admin
+- `up` probes the final hostname (with the forced prefix,
+  `<dev>-<name>.<tailnet-domain>`). The probe is a report only. It does not
+  block the start. The operator can still assign a suffixed hostname. The CLI
+  always prints the hostname from `status.loadBalancer.ingress`

@@ -1,0 +1,18 @@
+Provisioned namespace {{ .Values.dev }} for the herdr dev environments:
+
+  - ServiceAccount deploy + ns-scoped Role/RoleBinding
+    (no pvc delete — that is the admin-only data wipe)
+  - Secret deploy-token (explicit SA token; the token controller populates
+    data.token asynchronously — poll for it before reading)
+  - Secret herdr-dev-{{ .Values.dev }} (authorized_keys for the env sshd)
+
+Next steps (admin, see README.md):
+
+  1. Read the token:
+     kubectl -n {{ .Values.dev }} get secret deploy-token \
+       -o jsonpath='{.data.token}' | base64 -d
+  2. Create the ConfigMap herdr-dev-{{ .Values.dev }} with the dev image
+     tag, the rendered agent config, and the developer's LLM-proxy key
+     (cluster-tooling-specific — not part of this chart).
+  3. Write the developer's CLI config (api_base, namespace, dev_user,
+     tailnet_domain, token) and hand it to the developer.

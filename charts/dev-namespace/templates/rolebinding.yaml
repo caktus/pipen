@@ -1,0 +1,15 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: deploy
+  namespace: {{ .Values.dev | quote }}
+  labels:
+    {{- include "dev-namespace.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: deploy
+subjects:
+  - kind: ServiceAccount
+    name: deploy
+    namespace: {{ .Values.dev | quote }}

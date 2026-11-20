@@ -1,0 +1,26 @@
+# ns-scoped Role for the per-developer pipen CLI: everything `pipen up/ssh/
+# down/ls/logs` needs, and nothing else. Notably NO pvc delete — deleting
+# <env>-home is the admin-only data wipe. No cluster-wide, no cross-ns.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: deploy
+  namespace: {{ .Values.dev | quote }}
+  labels:
+    {{- include "dev-namespace.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods, pods/log, pods/exec]
+    verbs: [get, list, create, delete, watch]
+  - apiGroups: [""]
+    resources: [services]
+    verbs: [get, list, create, delete]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, create, update, delete]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, create, delete]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [get, list, create, watch]
