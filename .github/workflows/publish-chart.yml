@@ -50,6 +50,5 @@ jobs:
         with:
           charts_dir: charts
           packages_with_index: true # index.yaml and the .tgz on gh-pages
-          index_documentation: false
         env:
           CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
