@@ -10,3 +10,7 @@ go run "sigs.k8s.io/controller-tools/cmd/controller-gen@${CONTROLLER_GEN}" \
   crd paths=./api/... output:crd:dir=../charts/pipen-operator/crds
 mv ../charts/pipen-operator/crds/pens.pipen.dev_pens.yaml \
   ../charts/pipen-operator/crds/pens.pipen.dev.yaml
+# Keep the generated manifest in the repo's prettier format (pre-commit enforces it)
+if command -v prettier >/dev/null 2>&1; then
+  prettier -w ../charts/pipen-operator/crds/pens.pipen.dev.yaml >/dev/null
+fi
