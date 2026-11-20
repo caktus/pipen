@@ -52,6 +52,19 @@ entries:
   pipen-operator:
   - apiVersion: v2
     appVersion: 0.1.0
+    created: "2026-11-20T23:59:58.795467888Z"
+    description: Cluster-wide pipen operator (Pen CRD + reconciler Deployment + RBAC).
+      Install exactly once per cluster; per-developer namespaces get write access
+      via the dev-namespace chart.
+    digest: 2f5efa624a5a0729b4226a19a9bd884fed6d562a49f00d3ee4fa091fdc8775ce
+    home: https://github.com/caktus/pipen
+    name: pipen-operator
+    type: application
+    urls:
+    - pipen-operator-0.2.0.tgz
+    version: 0.2.0
+  - apiVersion: v2
+    appVersion: 0.1.0
     created: "2026-11-20T21:49:19.170351745Z"
     description: Cluster-wide pipen operator (Pen CRD + reconciler Deployment + RBAC).
       Install exactly once per cluster; per-developer namespaces get write access
@@ -63,4 +76,4 @@ entries:
     urls:
     - pipen-operator-0.1.0.tgz
     version: 0.1.0
-generated: "2026-11-20T23:04:57.010302825Z"
+generated: "2026-11-20T23:59:58.7954819Z"
