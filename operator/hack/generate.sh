@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 CONTROLLER_GEN="${CONTROLLER_GEN:-v0.19.0}"
 go run "sigs.k8s.io/controller-tools/cmd/controller-gen@${CONTROLLER_GEN}" object paths=./api/...
-rm -f ../charts/pipen-operator/templates/crd.yaml
+rm -f ../charts/pipen-operator/templates/pens.pipen.dev_pens.yaml
 go run "sigs.k8s.io/controller-tools/cmd/controller-gen@${CONTROLLER_GEN}" \
   crd paths=./api/... output:crd:dir=../charts/pipen-operator/templates
 mv ../charts/pipen-operator/templates/pens.pipen.dev_pens.yaml \
