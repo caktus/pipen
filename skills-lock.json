@@ -1,0 +1,44 @@
+{
+  "version": 2,
+  "skills": {
+    "deploying-to-kubernetes": {
+      "source": "git@github.com:caktus/skills.git",
+      "sourceUrl": "git@github.com:caktus/skills.git",
+      "commit": "f71e0dd0fb0ab230b648d6e0a14db2b2c9c5cf95",
+      "sourceType": "git",
+      "skillPath": "deploying-to-kubernetes/SKILL.md",
+      "computedHash": "7ded7a3c562cffcee52728404e70ecc27136f108caebc3c574f662e02095958f"
+    },
+    "draft-tickets": {
+      "source": "git@github.com:caktus/skills.git",
+      "sourceUrl": "git@github.com:caktus/skills.git",
+      "commit": "f71e0dd0fb0ab230b648d6e0a14db2b2c9c5cf95",
+      "sourceType": "git",
+      "skillPath": "draft-tickets/SKILL.md",
+      "computedHash": "f15c0d9be3b5c85476cd7499c75fa2f73ec335ce41a4b050d9fd38b6b32c5947"
+    },
+    "helm-app-chart": {
+      "source": "git@github.com:caktus/skills.git",
+      "sourceUrl": "git@github.com:caktus/skills.git",
+      "commit": "f71e0dd0fb0ab230b648d6e0a14db2b2c9c5cf95",
+      "sourceType": "git",
+      "skillPath": "helm-app-chart/SKILL.md",
+      "computedHash": "78485734889d31c18813159f70b44b3cb23c2f18dec611a803061ee7159c057d"
+    },
+    "simple-english": {
+      "source": "AminBlg/SimpleEnglish",
+      "commit": "300432a9e4c473229a7049ab61b8ca2522d9214c",
+      "sourceType": "github",
+      "skillPath": "skills/simple-english/SKILL.md",
+      "computedHash": "6e790385d3462e7d02270ca86db479a22d69f8a87fa16afeb85343ff42ff18af"
+    },
+    "tickets-as-code": {
+      "source": "git@github.com:caktus/skills.git",
+      "sourceUrl": "git@github.com:caktus/skills.git",
+      "commit": "f71e0dd0fb0ab230b648d6e0a14db2b2c9c5cf95",
+      "sourceType": "git",
+      "skillPath": "tickets-as-code/SKILL.md",
+      "computedHash": "196c7a6a50e5db85c9ac9b7107c0c6c335786dfd250758baf991b158b64449cd"
+    }
+  }
+}
