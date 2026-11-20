@@ -26,11 +26,22 @@ Or from a repo checkout: `helm install <dev> charts/dev-namespace ...`.
 
 - `Namespace` `<dev>` (label `herdr.dev/owner=<dev>`)
 - `ServiceAccount` `deploy`
-- `Role`/`RoleBinding` `deploy`: CRUD on pods/services/configmaps/secrets,
-  get/list/create/watch on persistentvolumeclaims, no pvc delete
+- `Role`/`RoleBinding` `deploy`: CRUD on `pens.pipen.dev/pens`, `get` on
+  `pens/status`, `get` on `pods`, `get` on `pods/log` (no pod, Service or PVC
+  create, no pvc delete)
+- `Role`/`RoleBinding` `pipen-operator` (in the same namespace): the
+  per-namespace writes for the operator's ServiceAccount (pods, services, pvc
+  create, pens/status update, configmap/secret get)
 - `Secret` `deploy-token` (`kubernetes.io/service-account-token`); the token
   controller fills `data.token` after a delay
 - `Secret` `herdr-dev-<dev>`: the ssh public keys
 
 The per-developer litellm key and the rendered pi configuration live in a
 ConfigMap that your cluster tooling creates. See the repo README (Admins).
+
+## 0.3.0 changed the role
+
+Before 0.3.0 the dev token managed raw pod, Service, configmap and secret
+objects directly. Since 0.3.0 it manages Pens only: the dev token creates and
+deletes Pens and reads their status. The operator, on its own
+ServiceAccount, creates the pod, Service and PVC for each Pen.
