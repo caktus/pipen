@@ -1,0 +1,76 @@
+# Chart publish for the caktus.github.io/pipen Helm chart repository.
+#
+# On every merge to main: chart-releaser detects charts whose Chart.yaml
+# version is new, creates a GitHub release per new version, pushes the
+# .tgz package into the gh-pages branch, and updates the index.yaml that
+# GitHub Pages serves from that branch. A merge that does not bump the
+# chart version publishes nothing (the run stays green). The version bump
+# is the release trigger; verify.yml requires it with chart changes.
+#
+# No pull_request trigger: a PR run must not publish unmerged code.
+#
+# One-time setup: set the Pages source to the gh-pages branch in the
+# repo settings (Settings -> Pages). See README.md (Admins, step 2).
+
+name: publish-chart
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: chart-publishing-${{ github.repository }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  release-chart:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # cr compares against the previous commit
+          persist-credentials: true
+
+      - name: Configure Git
+        run: |
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "${GITHUB_ACTOR}@users.noreply.github.com"
+
+      - name: Run chart-releaser
+        id: releaser
+        uses: helm/chart-releaser-action@v1.9.0
+        with:
+          charts_dir: charts
+          packages_with_index: true # index.yaml and the .tgz on gh-pages
+        env:
+          CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+
+      - name: Render the chart index page
+        # A human-readable landing page for the site root. Pages serves
+        # index.html for the directory and index.yaml for helm clients
+        # side by side. Runs after chart-releaser so a fresh publish lands
+        # under the listing. Skips the commit when nothing changed.
+        if: steps.releaser.outputs.changed_charts != ''
+        run: |
+          # render before switching branches: the detached gh-pages
+          # checkout replaces the worktree, which holds charts/ and this script
+          python3 "${GITHUB_WORKSPACE}/scripts/chart_index.py" > index.html.new
+          git fetch origin gh-pages
+          git checkout --detach origin/gh-pages
+          mv index.html.new index.html
+          if [ -z "$(git status --porcelain index.html)" ]; then
+            echo "index.html unchanged"
+            exit 0
+          fi
+          git add index.html
+          git commit -m "docs: refresh the chart index page"
+          git push origin HEAD:gh-pages

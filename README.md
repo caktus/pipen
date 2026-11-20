@@ -163,7 +163,32 @@ upgrade` never updates CRD schemas, and v1alpha1 is frozen for now)
 Install it exactly once per cluster. Its cluster-scoped objects and the CRD
 belong to a single release.
 
+### The chart repository (GitHub Pages)
+
+The `dev-namespace` chart publishes to `https://caktus.github.io/pipen`.
+A GitHub Actions workflow (`.github/workflows/publish-chart.yml`) runs
+chart-releaser on every merge to main. It creates a release for each new
+chart version and pushes the package and `index.yaml` to the `gh-pages`
+branch, which GitHub Pages serves. The release trigger is a `version`
+bump in `charts/dev-namespace/Chart.yaml`. A chart change without a bump
+publishes nothing and fails `verify.yml`. The site root also carries a
+human-readable index of the published charts. One-time setup: set the
+Pages source to the `gh-pages` branch in the repo settings.
+
 ### 3. Bootstrap a developer
+
+Install the chart from the chart repository:
+
+```sh
+helm repo add pipen https://caktus.github.io/pipen
+helm repo update pipen
+helm install <dev> pipen/dev-namespace --version <version> \
+  --set dev=<dev> \
+  --set 'authorizedKeys[0]=<ssh public key 1>' \
+  --set 'authorizedKeys[1]=<ssh public key 2>'
+```
+
+Or install by path from a checkout:
 
 ```sh
 helm install <dev> charts/dev-namespace \

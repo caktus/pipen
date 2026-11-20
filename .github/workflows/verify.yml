@@ -34,6 +34,22 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - name: Chart changes must bump the chart version
+        if: github.event_name == 'pull_request'
+        run: |
+          # the Chart.yaml version bump is the release trigger for the chart
+          # publish workflow, so a PR that touches charts/ without a bump
+          # would change the installed chart silently
+          base="${{ github.event.pull_request.base.sha }}"
+          git fetch --no-tags --depth=1 origin "$base"
+          if git diff --name-only FETCH_HEAD -- charts/ | grep -q .; then
+            git diff FETCH_HEAD -- charts/dev-namespace/Chart.yaml \
+              | grep -qE '^[+-]version:' \
+              || { echo "charts/ changed but the chart version was not bumped" >&2; exit 1; }
+            echo "chart version bump OK"
+          else
+            echo "no chart changes"
+          fi
       - name: Install helm
         run: |
           helm_version=3.16.4

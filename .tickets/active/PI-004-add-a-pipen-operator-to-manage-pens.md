@@ -2,13 +2,13 @@
 id: PI-004
 github_issue: 4
 github_url: https://github.com/caktus/pipen/issues/4
-last_synced: "2026-11-20T15:38:40.856605+00:00"
+last_synced: "2026-11-20T17:02:53.435424+00:00"
 synced_hash: d43a45e24fd64749a576cfa41d58d60f191bed7f37ed98dae16a1eff5e211c66
 title: Add a pipen operator to manage pens
 type: Feature
 assignee: "@me"
 labels:
-  - phase/draft
+  - phase/in-progress
 context:
   relates_to:
     - PI-001
