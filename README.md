@@ -201,7 +201,8 @@ uses `IfNotPresent` and runs the locally staged image instead of pulling.
 
 ### The chart repository (GitHub Pages)
 
-Both charts in `charts/` publish to `https://caktus.github.io/pipen`:
+Both charts in `charts/` publish to the chart repository you add with
+`helm repo add pipen https://caktus.github.io/pipen`:
 `pipen/dev-namespace` and `pipen/pipen-operator`. A GitHub Actions
 workflow (`.github/workflows/publish-chart.yml`) runs chart-releaser on
 every merge to main. It creates a release for each new chart version and
