@@ -10,7 +10,8 @@
 # No pull_request trigger: a PR run must not publish unmerged code.
 #
 # One-time setup: set the Pages source to the gh-pages branch in the
-# repo settings (Settings -> Pages). See README.md (Admins, step 2).
+# repo settings (Settings -> Pages). See README.md (Admins, "The chart
+# repository (GitHub Pages)").
 
 name: publish-chart
 
