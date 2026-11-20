@@ -1,0 +1,12 @@
+pipen-operator installed (image {{ .Values.image }}) in namespace pipen.
+
+Notes:
+- This release is installed exactly once per cluster. Its cluster-scoped
+  objects (ClusterRole, ClusterRoleBinding) and the CRD in crds/ belong to
+  a single release; a second release would conflict.
+- The CRD is applied at install only: `helm upgrade` never updates CRD
+  schemas. v1alpha1 is frozen for the MVP.
+- Give a developer a namespace with:
+    helm install <dev> charts/dev-namespace --set dev=<dev> ...
+  which grants the operator per-namespace write RBAC and a reduced Role to
+  the developer's token.

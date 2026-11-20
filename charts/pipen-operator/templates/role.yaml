@@ -1,0 +1,15 @@
+# Leader election in the operator's own namespace (leases + events).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pipen-operator
+  namespace: pipen
+  labels:
+    app.kubernetes.io/name: pipen-operator
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: [leases]
+    verbs: [get, create, update]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]

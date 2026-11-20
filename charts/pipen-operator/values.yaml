@@ -1,0 +1,33 @@
+# Operator image (full reference). REQUIRED:
+#   helm install pipen-operator charts/pipen-operator --set image=<ref>
+image: ""
+
+# One replica; leader election is on so a future 2-replica flip is cheap.
+replicaCount: 1
+
+# Cluster shape, rendered into ConfigMap pipen-operator-config which the
+# operator reads (and watches: a change re-reconciles all pens).
+config:
+  # Default pod image for pens (Pen spec.image overrides per pen).
+  image: "ghcr.io/caktus/pipen:latest"
+  # Home PVC size.
+  homeSize: "10Gi"
+  # Pod cpu request/limit.
+  cpu: "4"
+  # Pod memory request/limit.
+  memory: "8Gi"
+  # Node selector: the only nodes that can attach the home volume.
+  nodeSelector:
+    openebs.io/engine: mayastor
+  # Home PVC storage class.
+  storageClass: "mayastor-2"
+  # Annotations on every pen Service (tailscale L4 exposure). The
+  # tailscale.com/hostname annotation is set per pen by the operator.
+  serviceAnnotations:
+    tailscale.com/expose: "true"
+  # Informational tailnet domain (TAILNET_HOSTNAME env, logged hostnames).
+  tailnetDomain: ""
+  # Pod image pull policy (latest tags always pull).
+  imagePullPolicy: "IfNotPresent"
+  # loadBalancerClass for pen Services (the Tailscale operator).
+  loadBalancerClass: "tailscale"
