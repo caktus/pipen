@@ -157,12 +157,13 @@ One-time setup: open the package page for `caktus/pipen-operator` and set
 its visibility to **public**. GitHub creates packages pushed this way as
 private by default, and the operator pod pulls anonymously.
 
+The chart is published in the chart repository (see the section below):
+
 ```sh
+helm install pipen-operator pipen/pipen-operator
+# or from a checkout:
 helm install pipen-operator charts/pipen-operator
 ```
-
-Or, from the chart repository (see the section below):
-`helm install pipen-operator pipen/pipen-operator`
 
 This creates, in namespace `pipen`:
 
@@ -200,13 +201,14 @@ uses `IfNotPresent` and runs the locally staged image instead of pulling.
 
 ### The chart repository (GitHub Pages)
 
-The `dev-namespace` chart publishes to `https://caktus.github.io/pipen`.
-A GitHub Actions workflow (`.github/workflows/publish-chart.yml`) runs
-chart-releaser on every merge to main. It creates a release for each new
-chart version and pushes the package and `index.yaml` to the `gh-pages`
-branch, which GitHub Pages serves. The release trigger is a `version`
-bump in `charts/dev-namespace/Chart.yaml`. A chart change without a bump
-publishes nothing and fails `verify.yml`. The site root also carries a
+Both charts in `charts/` publish to `https://caktus.github.io/pipen`:
+`pipen/dev-namespace` and `pipen/pipen-operator`. A GitHub Actions
+workflow (`.github/workflows/publish-chart.yml`) runs chart-releaser on
+every merge to main. It creates a release for each new chart version and
+pushes the package and `index.yaml` to the `gh-pages` branch, which
+GitHub Pages serves. The release trigger is a `version` bump in a
+chart's `Chart.yaml`. A chart change without a bump publishes nothing and
+fails `verify.yml`. The site root also carries a
 human-readable index of the published charts. One-time setup: set the
 Pages source to the `gh-pages` branch in the repo settings.
 
@@ -217,7 +219,7 @@ Install the chart from the chart repository:
 ```sh
 helm repo add pipen https://caktus.github.io/pipen
 helm repo update pipen
-helm install <dev> pipen/dev-namespace --version <version> \
+helm install <dev> pipen/dev-namespace --version 0.3.0 \
   --set dev=<dev> \
   --set 'authorizedKeys[0]=<ssh public key 1>' \
   --set 'authorizedKeys[1]=<ssh public key 2>'
