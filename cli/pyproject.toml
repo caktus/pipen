@@ -14,11 +14,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 # Single-file layout: ship pipen.py as the top-level `pipen` module.
-# The pod/service templates live in the repo's devenv/templates dir;
-# the CLI resolves them at runtime from the repo checkout (CWD walk-up)
-# or $HERDR_TEMPLATES — `uv tool install <repo>/cli` works for
-# ls/logs/down/ssh, and `up` needs HERDR_TEMPLATES pointed at a checkout
-# (or just run `uv run cli/pipen.py` from the repo).
+# The CLI manages only the Pen CR — no template files; run `uv tool
+# install <repo>/cli` or `uv run cli/pipen.py` from the repo.
 [tool.hatch.build.targets.wheel]
 packages = []
 

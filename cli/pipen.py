@@ -3,36 +3,36 @@
 
 Stdlib only. Reads ~/.config/pipen/config.yaml (written by the admin
 bootstrap, see README.md) and talks to the cluster API at api_base
-with the namespace-scoped SA token. Every verb this CLI uses is granted by
-the bootstrap Role, and no more — but that scope is only ENFORCED once the
-cluster runs --authorization-mode=RBAC; while it runs AlwaysAllow, any
-authenticated token can do anything, so the cluster itself is the perimeter
-until the flip.
+with the namespace-scoped SA token. The CLI manages only the Pen CR
+(think of it as a ticket the cluster operator acts on): `up` creates
+one Pen and the cluster-wide pipen operator brings the PVC, kata pod
+and tailnet Service up, reporting the result on Pen status. The dev
+token can no longer create raw (privileged) pods.
 
 Verbs:
-  up <name>    Create the home PVC (if absent), the env ConfigMap, the kata
-               pod and the tailnet-exposed Service; wait for pod ready and
-               the operator-assigned MagicDNS hostname; print the ssh line.
-               The pod pulls ghcr.io/caktus/pipen, tag `latest` by default,
-               or the tag you pass with --tag.
-  ssh <name>   Resolve the hostname from the live Service status and ssh in.
-  down <name>  Delete pod + Service + env ConfigMap. The PVC and its data
-               remain (admin wipe: kubectl -n <ns> delete pvc <name>-home).
-  ls           List env pods/services in the dev namespace.
+  up <name>    Create a Pen (spec: image/homeSize/cpu/memory) and wait
+               for status ready; print the ssh line from the
+               operator-assigned tailnet hostname. The default image
+               is the operator's config default; pin one with --image.
+  ssh <name>   Resolve the hostname from Pen status and ssh in.
+  down <name>  Delete the Pen. The operator's garbage collection removes
+               the pod and Service; the home PVC and its data remain
+               (admin wipe: kubectl -n <ns> delete pvc <name>-home).
+  ls           List Pens in the dev namespace (phase/node/hostname).
   logs <name>  Stream the env pod logs.
 
 Env names are force-prefixed with your developer/namespace so the tailnet
 hostnames are collision-proof across devs: `pipen up test-smoke` as tobias
-addresses env/service `tobias-test-smoke` (hostname
-tobias-test-smoke.<tailnet-domain>); a name that already starts with
-`<dev>-` passes through unchanged, so `pipen down test-smoke` and
-`pipen down tobias-test-smoke` address the same env. A name starting with
+addresses pen `tobias-test-smoke`; a name that already starts with `<dev>-`
+passes through unchanged, so `pipen down test-smoke` and
+`pipen down tobias-test-smoke` address the same pen. A name starting with
 someone else's prefix gets your prefix too (tobias-bob-foo) — intended,
 no special-casing.
 
-The operator may suffix the assigned MagicDNS hostname (e.g. <name> ->
-<name>-1), so this CLI always reads status.loadBalancer.ingress — never the
-requested name — and prints the hostname it actually found.
+The Tailscale operator may suffix the assigned MagicDNS hostname (e.g.
+<name> -> <name>-1); the operator copies the assigned name into
+status.hostname, so this CLI always reads that — never the requested
+name.
 """
 
 from __future__ import annotations
@@ -42,21 +42,16 @@ import json
 import os
 import re
 import shutil
-import socket
 import ssl
 import subprocess
 import sys
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 
-CONFIG_PATH = os.environ.get(
-    "PIPEN_CONFIG", os.path.expanduser("~/.config/pipen/config.yaml")
-)
-TOKEN_RE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
-TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+PENS_GROUP = "pens.pipen.dev/v1alpha1"
+POLL_SECONDS = 5
 
 
 def die(msg: str, code: int = 1):
@@ -64,14 +59,21 @@ def die(msg: str, code: int = 1):
     sys.exit(code)
 
 
+def config_path() -> str:
+    return os.environ.get(
+        "PIPEN_CONFIG", os.path.expanduser("~/.config/pipen/config.yaml")
+    )
+
+
 def load_config() -> dict:
     """Parse the flat `key: value` config file (the bootstrap play writes a
     fixed shape; a YAML parser is out of scope for a stdlib-only CLI)."""
+    path = config_path()
     try:
-        with open(CONFIG_PATH, encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             lines = f.read().splitlines()
     except OSError as e:
-        die(f"cannot read {CONFIG_PATH}: {e} — copy deployment/.herdr-<dev>.yaml there")
+        die(f"cannot read {path}: {e} — copy the CLI config the admin gave you there")
     cfg = {}
     for line in lines:
         line = line.strip()
@@ -82,9 +84,9 @@ def load_config() -> dict:
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
         cfg[key.strip()] = value
-    for required in ("api_base", "namespace", "dev_user", "token", "tailnet_domain"):
+    for required in ("api_base", "namespace", "dev_user", "token"):
         if not cfg.get(required):
-            die(f"{CONFIG_PATH} is missing {required!r}")
+            die(f"{path} is missing {required!r}")
     return cfg
 
 
@@ -116,12 +118,8 @@ class Api:
             "Accept": "application/json",
         }
         if body is not None:
-            if isinstance(body, str):  # rendered k8s template (YAML)
-                data = body.encode()
-                headers["Content-Type"] = "application/yaml"
-            else:  # dict (PVC / env ConfigMap) -> JSON
-                data = json.dumps(body).encode()
-                headers["Content-Type"] = "application/json"
+            data = json.dumps(body).encode()
+            headers["Content-Type"] = "application/json"
         req = urllib.request.Request(
             self.base + path, data=data, method=method, headers=headers
         )
@@ -137,6 +135,10 @@ class Api:
 
     def ns_path(self, ns: str, suffix: str) -> str:
         return f"/api/v1/namespaces/{ns}{suffix}"
+
+    def pens_path(self, ns: str, name: str = "") -> str:
+        base = f"/apis/{PENS_GROUP}/namespaces/{ns}/pens"
+        return base if not name else f"{base}/{name}"
 
 
 def validate_name(name: str) -> str:
@@ -163,244 +165,97 @@ def resolve_env(name: str, dev: str) -> str:
     return name
 
 
-def templates_dir() -> str:
-    env = os.environ.get("PIPEN_TEMPLATES")
-    if env:
-        if os.path.isfile(os.path.join(env, "pod.yaml")):
-            return env
-        die(f"PIPEN_TEMPLATES={env} has no pod.yaml")
-    d = os.getcwd()
-    while True:  # walk up: run-from-checkout works from any subdirectory
-        cand = os.path.join(d, "devenv", "templates")
-        if os.path.isfile(os.path.join(cand, "pod.yaml")):
-            return cand
-        parent = os.path.dirname(d)
-        if parent == d:
-            break
-        d = parent
-    die(
-        "cannot find devenv/templates — run from the repo checkout or set PIPEN_TEMPLATES"
-    )
+def pen_spec(image: str, size: str, cpu: str, memory: str) -> dict:
+    """Pen spec body; an empty image leaves the operator's default."""
+    spec = {"homeSize": size, "cpu": cpu, "memory": memory}
+    if image:
+        spec["image"] = image
+    return spec
 
 
-def render(template: str, values: dict) -> str:
-    with open(os.path.join(templates_dir(), template), encoding="utf-8") as f:
-        text = f.read()
-
-    def sub(m: re.Match) -> str:
-        key = m.group(1)
-        if key not in values:
-            die(f"internal: unresolved template token '{key}' in {template}")
-        return str(values[key])
-
-    rendered = TOKEN_RE.sub(sub, text)
-    if TOKEN_RE.search(rendered):
-        die("internal: template has unresolved tokens")
-    return rendered
+def pen_body(name: str, namespace: str, spec: dict) -> dict:
+    return {
+        "apiVersion": PENS_GROUP,
+        "kind": "Pen",
+        "metadata": {"name": name, "namespace": namespace},
+        "spec": spec,
+    }
 
 
-def service_hostname(api: Api, ns: str, name: str) -> "str | None":
-    status, body = api.request("GET", api.ns_path(ns, f"/services/{name}"))
+def pen_status_fields(body: dict) -> dict:
+    status = body.get("status", {})
+    return {
+        "phase": status.get("phase", "Unknown"),
+        "ready": bool(status.get("ready")),
+        "hostname": status.get("hostname") or "",
+        "node": status.get("node") or "",
+        "message": status.get("message") or "",
+    }
+
+
+def get_pen(api: Api, ns: str, env: str) -> "tuple[int, dict]":
+    status, body = api.request("GET", api.pens_path(ns, env))
     if status == 404:
-        return None
+        die(f"pen {env} not found (is the env up? `pipen up {env}`)")
     if status != 200:
-        die(f"cannot read service {name}: HTTP {status} {body}")
-    ingress = (body.get("status", {}).get("loadBalancer") or {}).get("ingress") or []
-    if not ingress:
-        return None
-    # hostname first; the tailscale ingress may report a VIP `ip` with no
-    # hostname — that is still directly reachable, so fall back to it
-    # instead of burning the full wait and dying.
-    return ingress[0].get("hostname") or ingress[0].get("ip")
-
-
-def ensure_pvc(api: Api, ns: str, name: str, env: str, size: str) -> None:
-    status, _ = api.request("GET", api.ns_path(ns, f"/persistentvolumeclaims/{name}"))
-    if status == 200:
-        return
-    if status != 404:
-        die(f"cannot read pvc {name}: HTTP {status}")
-    body = {
-        "apiVersion": "v1",
-        "kind": "PersistentVolumeClaim",
-        "metadata": {"name": name, "namespace": ns, "labels": {"herdr.dev/env": env}},
-        "spec": {
-            "accessModes": ["ReadWriteOnce"],
-            "storageClassName": "mayastor-2",
-            "resources": {"requests": {"storage": size}},
-        },
-    }
-    status, body = api.request("POST", api.ns_path(ns, "/persistentvolumeclaims"), body)
-    if status not in (200, 201):
-        die(f"pvc create failed: HTTP {status} {body}")
-    print(f"pipen: created pvc {name} ({size}, mayastor-2 mirrored)")
-
-
-def ensure_env_configmap(api: Api, ns: str, env: str, data: dict) -> None:
-    name = f"env-{env}-config"
-    base = {
-        "apiVersion": "v1",
-        "kind": "ConfigMap",
-        "metadata": {"name": name, "namespace": ns, "labels": {"herdr.dev/env": env}},
-        "data": data,
-    }
-    status, body = api.request("GET", api.ns_path(ns, f"/configmaps/{name}"))
-    if status == 404:
-        status, body = api.request("POST", api.ns_path(ns, "/configmaps"), base)
-    elif status == 200:
-        if (body.get("data") or {}) != data:
-            base["metadata"]["resourceVersion"] = body["metadata"]["resourceVersion"]
-            status, body = api.request(
-                "PUT", api.ns_path(ns, f"/configmaps/{name}"), base
-            )
-    if status not in (200, 201):
-        die(f"configmap {name} update failed: HTTP {status} {body}")
-
-
-def wait_pod_ready(api: Api, ns: str, name: str, timeout: int) -> None:
-    deadline = time.time() + timeout
-    last = None
-    while time.time() < deadline:
-        status, body = api.request("GET", api.ns_path(ns, f"/pods/{name}"))
-        if status == 404:
-            die(
-                f"pod {name} vanished (HTTP 404) — `pipen logs` before it dies shows why"
-            )
-        if status != 200:
-            die(f"cannot read pod {name}: HTTP {status} {body}")
-        pod_status = body.get("status", {})
-        phase = pod_status.get("phase", "Unknown")
-        cs = (pod_status.get("containerStatuses") or [{}])[0]
-        ready = bool(cs.get("ready"))
-        info = phase
-        waiting = (cs.get("state") or {}).get("waiting")
-        if not ready and waiting:
-            info = f"{phase}: {waiting.get('reason', 'waiting')}"
-        if info != last:
-            print(f"pipen: pod {name} {info} …", flush=True)
-            last = info
-        if ready and phase == "Running":
-            print(
-                f"pipen: pod {name} ready on {body.get('spec', {}).get('nodeName', '?')}"
-            )
-            return
-        time.sleep(5)
-    die(f"pod {name} not ready within {timeout}s — `pipen logs {name}`")
+        die(f"cannot read pen {env}: HTTP {status} {body}")
+    return status, body
 
 
 def cmd_up(args, cfg, api) -> int:
     ns, dev = cfg["namespace"], cfg["dev_user"]
     env = validate_name(resolve_env(args.name, dev))
 
-    status, body = api.request("GET", api.ns_path(ns, f"/configmaps/herdr-dev-{dev}"))
-    if status == 404:
-        die(
-            f"no ConfigMap herdr-dev-{dev} in ns {ns} — the admin must run the herdr bootstrap first"
-        )
-    if status != 200:
-        die(f"cannot read herdr-dev-{dev}: HTTP {status} {body}")
-    cm_data = body.get("data") or {}
-    if not TAG_RE.match(args.tag):
-        die(f"invalid image tag {args.tag!r} (docker tag charset, max 128 chars)")
-    image_tag = args.tag
-    env_config = {
-        k: cm_data[k]
-        for k in ("models.json", "settings.json", "litellm_key")
-        if k in cm_data
-    }
-
-    wanted = f"{env}.{cfg['tailnet_domain']}"
-    try:  # advisory only: the operator may still assign a suffixed hostname
-        socket.getaddrinfo(wanted, 22)
-        print(
-            f"pipen: note: {wanted} already resolves on the tailnet — expect a suffixed hostname (e.g. {env}-1)"
-        )
-    except socket.gaierror:
-        pass
-
-    ensure_pvc(api, ns, f"{env}-home", env, args.size)
-    ensure_env_configmap(api, ns, env, env_config)
-
-    status, _ = api.request("GET", api.ns_path(ns, f"/pods/env-{env}"))
-    if status == 200:
-        print(f"pipen: pod env-{env} already exists (pipen down {env} + up to rebuild)")
+    status, body = api.request(
+        "POST",
+        api.pens_path(ns),
+        pen_body(env, ns, pen_spec(args.image, args.size, args.cpu, args.memory)),
+    )
+    if status in (200, 201):
+        print(f"pipen: created pen {env} (operator brings the env up)")
+    elif status == 409:
+        print(f"pipen: pen {env} already exists (pipen down {env} + up to rebuild)")
     else:
-        pod = render(
-            "pod.yaml",
-            {
-                "name": env,
-                "namespace": ns,
-                "image_tag": image_tag,
-                "dev_user": dev,
-                "hostname": wanted,
-                "cpu": args.cpu,
-                "memory": args.memory,
-            },
-        )
-        status, body = api.request("POST", api.ns_path(ns, "/pods"), pod)
-        if status not in (200, 201):
-            die(f"pod create failed: HTTP {status} {body}")
-        print(f"pipen: created pod env-{env} (image ghcr.io/caktus/pipen:{image_tag})")
+        die(f"pen create failed: HTTP {status} {body}")
 
-    status, _ = api.request("GET", api.ns_path(ns, f"/services/{env}"))
-    if status == 200:
-        print(f"pipen: service {env} already exists")
-    else:
-        svc = render("service.yaml", {"name": env, "namespace": ns})
-        status, body = api.request("POST", api.ns_path(ns, "/services"), svc)
-        if status not in (200, 201):
-            die(f"service create failed: HTTP {status} {body}")
-        print(f"pipen: created service {env} (tailscale L4 exposure)")
-
-    wait_pod_ready(api, ns, f"env-{env}", args.timeout)
-
-    hostname, deadline = None, time.time() + 600
+    deadline = time.time() + args.timeout
+    last = None
     while time.time() < deadline:
-        hostname = service_hostname(api, ns, env)
-        if hostname:
-            break
-        time.sleep(5)
-    if not hostname:
-        die(
-            f"pod is ready but service {env} has no tailnet hostname yet — retry `pipen up {env}` in a moment"
-        )
-
-    print()
-    print(f"pipen: ready — ssh {dev}@{hostname}")
-    if hostname != wanted:
-        print(
-            f"pipen: (the operator assigned {hostname}; the requested name was {env})"
-        )
-    return 0
+        _, body = get_pen(api, ns, env)
+        f = pen_status_fields(body)
+        if f["ready"]:
+            print()
+            print(f"pipen: ready — ssh {dev}@{f['hostname']}")
+            return 0
+        if f["phase"] == "Failed":
+            die(f"pen {env} failed: {f['message']}")
+        info = f["phase"] + (f": {f['message']}" if f["message"] else "")
+        if info != last:
+            print(f"pipen: {env} {info} …", flush=True)
+            last = info
+        time.sleep(POLL_SECONDS)
+    die(f"pen {env} not ready within {args.timeout}s — `pipen ls` shows status")
+    return 0  # unreachable
 
 
 def cmd_ssh(args, cfg, api) -> int:
     ns, dev = cfg["namespace"], cfg["dev_user"]
     env = validate_name(resolve_env(args.name, dev))
-    hostname = service_hostname(api, ns, env)
-    if not hostname:
-        die(f"service {env} has no hostname (is the env up? `pipen up {env}`)")
-    subprocess.run(["ssh", f"{dev}@{hostname}"] + args.ssh_args)
+    _, body = get_pen(api, ns, env)
+    f = pen_status_fields(body)
+    if not f["hostname"]:
+        die(f"pen {env} has no tailnet hostname yet (phase {f['phase']})")
+    subprocess.run(["ssh", f"{dev}@{f['hostname']}"] + args.ssh_args)
     return 0
 
 
 def cmd_down(args, cfg, api) -> int:
     ns, dev = cfg["namespace"], cfg["dev_user"]
     env = validate_name(resolve_env(args.name, dev))
-    failures = []
-    for kind, name in (
-        ("pods", f"env-{env}"),
-        ("services", env),
-        ("configmaps", f"env-{env}-config"),
-    ):
-        status, body = api.request("DELETE", api.ns_path(ns, f"/{kind}/{name}"))
-        # 404 = already gone (an external delete, or a second `down`)
-        if status not in (200, 202, 404):
-            failures.append((kind, name, status, body))
-    if failures:
-        for kind, name, status, body in failures:
-            print(f"pipen: delete {kind}/{name}: HTTP {status} {body}", file=sys.stderr)
-        return 1
+    status, body = api.request("DELETE", api.pens_path(ns, env))
+    # 404 = already gone (an external delete, or a second `down`)
+    if status not in (200, 202, 404):
+        die(f"pen delete failed: HTTP {status} {body}")
     print(f"pipen: env {env} down. PVC {env}-home (and its data) remains in ns {ns}.")
     print(f"pipen: admin data wipe: kubectl -n {ns} delete pvc {env}-home")
     return 0
@@ -408,35 +263,20 @@ def cmd_down(args, cfg, api) -> int:
 
 def cmd_ls(args, cfg, api) -> int:
     ns = cfg["namespace"]
-    sel = urllib.parse.quote("herdr.dev/env", safe="")
-    status, pods = api.request("GET", api.ns_path(ns, f"/pods?labelSelector={sel}"))
+    status, body = api.request("GET", api.pens_path(ns))
     if status != 200:
-        die(f"cannot list pods: HTTP {status} {pods}")
-    status, services = api.request(
-        "GET", api.ns_path(ns, f"/services?labelSelector={sel}")
-    )
-    if status != 200:
-        die(f"cannot list services: HTTP {status} {services}")
-    hosts = {
-        s["metadata"]["name"]: service_hostname(api, ns, s["metadata"]["name"])
-        for s in services.get("items", [])
-    }
-    if not pods.get("items"):
+        die(f"cannot list pens: HTTP {status} {body}")
+    items = body.get("items", [])
+    if not items:
         print("(no herdr envs)")
         return 0
-    print(f"{'ENV':<24} {'POD':<10} {'NODE':<16} HOSTNAME")
-    for p in pods.get("items", []):
-        env = p["metadata"]["labels"]["herdr.dev/env"]
-        pod_status = p.get("status", {})
-        cs = (pod_status.get("containerStatuses") or [{}])[0]
-        state = pod_status.get("phase", "Unknown")
-        if not cs.get("ready"):
-            waiting = (cs.get("state") or {}).get("waiting")
-            if waiting:
-                state = f"{state}/{waiting.get('reason', 'waiting')}"
-        node = p.get("spec", {}).get("nodeName", "-")
-        host = hosts.get(env) or "-"
-        print(f"{env:<24} {state:<10} {node:<16} {host}")
+    print(f"{'ENV':<24} {'PHASE':<10} {'NODE':<16} HOSTNAME")
+    for pen in items:
+        env = pen["metadata"]["name"]
+        f = pen_status_fields(pen)
+        print(
+            f"{env:<24} {f['phase']:<10} {f['node'] or '-':<16} {f['hostname'] or '-'}"
+        )
     return 0
 
 
@@ -459,15 +299,15 @@ def main() -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_up = sub.add_parser(
-        "up", help="bring up env <name> (PVC + pod + tailnet Service)"
+        "up", help="bring up env <name> (creates one Pen; the operator does the rest)"
     )
     p_up.add_argument("name")
-    p_up.add_argument("--size", default="10Gi", help="home PVC size (default: 10Gi)")
     p_up.add_argument(
-        "--tag",
-        default="latest",
-        help="image tag on ghcr.io/caktus/pipen (default: latest; pin a dated tag like 20261121-pi1.6.0)",
+        "--image",
+        default="",
+        help="full image reference (default: the operator's configured image, ghcr.io/caktus/pipen:latest)",
     )
+    p_up.add_argument("--size", default="10Gi", help="home PVC size (default: 10Gi)")
     p_up.add_argument("--cpu", default="4", help="cpu request/limit (default: 4)")
     p_up.add_argument(
         "--memory", default="8Gi", help="memory request/limit (default: 8Gi)"
@@ -476,12 +316,10 @@ def main() -> int:
         "--timeout",
         type=int,
         default=1800,
-        help="pod-ready timeout in seconds (default: 1800)",
+        help="pen-ready timeout in seconds (default: 1800)",
     )
 
-    p_ssh = sub.add_parser(
-        "ssh", help="ssh into env <name> (hostname from live Service status)"
-    )
+    p_ssh = sub.add_parser("ssh", help="ssh into env <name> (hostname from Pen status)")
     p_ssh.add_argument("name")
     p_ssh.add_argument(
         "ssh_args", nargs=argparse.REMAINDER, help="arguments passed to ssh"

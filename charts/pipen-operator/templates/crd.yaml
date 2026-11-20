@@ -1,0 +1,107 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: pens.pens.pipen.dev
+spec:
+  group: pens.pipen.dev
+  names:
+    kind: Pen
+    listKind: PenList
+    plural: pens
+    singular: pen
+  scope: Namespaced
+  versions:
+    - additionalPrinterColumns:
+        - jsonPath: .status.phase
+          name: PHASE
+          type: string
+        - jsonPath: .status.hostname
+          name: HOSTNAME
+          type: string
+        - jsonPath: .status.node
+          name: NODE
+          type: string
+      name: v1alpha1
+      schema:
+        openAPIV3Schema:
+          description: |-
+            Pen is the Schema for the pens API. It requests one kata dev
+            environment in its namespace; the operator brings the PVC, pod and
+            tailnet-exposed Service up and reports the result in status.
+          properties:
+            apiVersion:
+              description: |-
+                APIVersion defines the versioned schema of this representation of an object.
+                Servers should convert recognized schemas to the latest internal value, and
+                may reject unrecognized values.
+                More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+              type: string
+            kind:
+              description: |-
+                Kind is a string value representing the REST resource this object represents.
+                Servers may infer this from the endpoint the client submits requests to.
+                Cannot be updated.
+                In CamelCase.
+                More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+              type: string
+            metadata:
+              type: object
+            spec:
+              description: PenSpec is the desired state of a pen (a kata dev environment).
+              properties:
+                cpu:
+                  description: CPU is the pod cpu request and limit (default 4).
+                  type: string
+                homeSize:
+                  description:
+                    HomeSize is the size of the mirrored home PVC (default
+                    10Gi).
+                  type: string
+                image:
+                  description: |-
+                    Image is the full container image reference. Empty means the
+                    operator's default image from its config.
+                  type: string
+                memory:
+                  description: Memory is the pod memory request and limit (default 8Gi).
+                  type: string
+              type: object
+            status:
+              description: PenStatus is the observed state of a pen.
+              properties:
+                hostname:
+                  description:
+                    Hostname is the tailnet-assigned hostname (or IP) of
+                    the pen.
+                  type: string
+                message:
+                  description:
+                    Message carries a human-readable explanation for non-Ready
+                    states.
+                  type: string
+                node:
+                  description: Node is the node the pod landed on.
+                  type: string
+                observedGeneration:
+                  description:
+                    ObservedGeneration is the .metadata.generation the status
+                    reflects.
+                  format: int64
+                  type: integer
+                phase:
+                  description: Phase is the lifecycle state.
+                  type: string
+                ready:
+                  description: Ready is true when ssh via status.hostname works.
+                  type: boolean
+              required:
+                - ready
+              type: object
+          type: object
+      served: true
+      storage: true
+      subresources:
+        status: {}

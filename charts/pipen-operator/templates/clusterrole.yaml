@@ -1,0 +1,16 @@
+# Cluster-scoped READ-ONLY access to Pens only: the operator reconciles
+# pens in every provisioned developer namespace. All writes are
+# per-namespace Roles created by the dev-namespace chart.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pipen-operator
+  labels:
+    app.kubernetes.io/name: pipen-operator
+rules:
+  - apiGroups: ["pens.pipen.dev"]
+    resources: [pens]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get]

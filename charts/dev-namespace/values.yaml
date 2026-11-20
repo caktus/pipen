@@ -1,4 +1,4 @@
-# Developer name — this IS the namespace name. Must be RFC 1123
+# Developer name: this IS the namespace name. Must be RFC 1123
 # (lowercase alphanumerics and '-'); a developer the admins have granted
 # an environment for.
 dev: ""
@@ -7,3 +7,8 @@ dev: ""
 # Secret herdr-dev-<dev> (key authorized_keys), which the herdr CLI's pod
 # template projects into every env.
 authorizedKeys: []
+
+# Where the cluster-wide pipen-operator lives (pipen-operator chart). Its
+# ServiceAccount gets a per-namespace write Role in this namespace.
+operator:
+  namespace: pipen

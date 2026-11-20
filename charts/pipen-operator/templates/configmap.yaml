@@ -1,0 +1,22 @@
+# Operator config: cluster shape the reconciler applies to pens. The
+# operator watches this ConfigMap; a change re-reconciles all pens
+# (create-or-leave: existing pod/service/pvc specs are untouched, so the
+# change applies to pens created afterwards).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pipen-operator-config
+  namespace: pipen
+  labels:
+    app.kubernetes.io/name: pipen-operator
+data:
+  image: {{ .Values.config.image | quote }}
+  homeSize: {{ .Values.config.homeSize | quote }}
+  cpu: {{ .Values.config.cpu | quote }}
+  memory: {{ .Values.config.memory | quote }}
+  nodeSelector: {{ .Values.config.nodeSelector | toJson | quote }}
+  storageClass: {{ .Values.config.storageClass | quote }}
+  serviceAnnotations: {{ .Values.config.serviceAnnotations | toJson | quote }}
+  tailnetDomain: {{ .Values.config.tailnetDomain | quote }}
+  imagePullPolicy: {{ .Values.config.imagePullPolicy | quote }}
+  loadBalancerClass: {{ .Values.config.loadBalancerClass | quote }}
