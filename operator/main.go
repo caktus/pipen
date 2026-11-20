@@ -20,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -30,6 +31,7 @@ import (
 )
 
 func main() {
+	ctrl.SetLogger(zap.New())
 	var opNamespace string
 	if env := os.Getenv("POD_NAMESPACE"); env != "" {
 		opNamespace = env
@@ -51,6 +53,10 @@ func main() {
 		HealthProbeBindAddress: ":8081",
 		LeaderElection:         true,
 		LeaderElectionID:       "pipen-operator.pipen.dev",
+		// Set explicitly: POD_NAMESPACE is the operator's namespace (the
+		// downward API gives it to us), so we never depend on the
+		// serviceaccount namespace file being present.
+		LeaderElectionNamespace: opNamespace,
 		// The cache holds Pens (cluster-wide, the only cluster-scoped
 		// list/watch the operator has) plus the operator's own ConfigMap,
 		// scoped to the operator namespace so it opens no cluster-wide
