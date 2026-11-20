@@ -2,13 +2,13 @@
 id: PI-003
 github_issue: 3
 github_url: https://github.com/caktus/pipen/issues/3
-last_synced: "2026-11-20T15:58:38.473723+00:00"
+last_synced: '2026-11-20T22:19:14.472869+00:00'
 synced_hash: b951c75103e56660da337e5d250de0841dc0ad3f6d938ff73bcacda2b258d4f8
 title: Nightly herdr image builds on GitHub Actions
 type: Task
-assignee: "@me"
+assignee: '@me'
 labels:
-  - phase/in-progress
+- phase/done
 context:
   relates_to: []
 ---

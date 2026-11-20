@@ -2,17 +2,17 @@
 id: PI-004
 github_issue: 4
 github_url: https://github.com/caktus/pipen/issues/4
-last_synced: "2026-11-20T17:02:53.435424+00:00"
+last_synced: '2026-11-20T22:19:25.847038+00:00'
 synced_hash: d43a45e24fd64749a576cfa41d58d60f191bed7f37ed98dae16a1eff5e211c66
 title: Add a pipen operator to manage pens
 type: Feature
-assignee: "@me"
+assignee: '@me'
 labels:
-  - phase/in-progress
+- phase/done
 context:
   relates_to:
-    - PI-001
-    - PI-003
+  - PI-001
+  - PI-003
 ---
 
 As a developer, I want `pipen up` to create a single Pen resource and have an operator bring the environment up, so that the CLI needs no template files or cluster-shape knowledge, and my token can no longer create raw (privileged) pods.
