@@ -58,18 +58,27 @@ An admin bootstraps you once (see Admins) and gives you the
    cp .herdr-<you>.yaml ~/.config/pipen/config.yaml   # 0600
    ```
 
-2. Install the CLI. Use a checkout of this repo:
+2. Install the CLI. It installs straight from GitHub, no checkout needed:
 
    ```sh
-   uv run cli/pipen.py --help
+   uv tool install "git+https://github.com/caktus/pipen#subdirectory=cli"
    ```
 
-   Or install it. `up` also needs the templates, so point `PIPEN_TEMPLATES` at
-   a checkout:
+   Or run it without an install. `uvx` builds a throwaway environment:
 
    ```sh
-   uv tool install <checkout>/cli
-   export PIPEN_TEMPLATES=<checkout>/devenv/templates   # for `pipen up`
+   uvx --from "git+https://github.com/caktus/pipen#subdirectory=cli" pipen --help
+   ```
+
+   To pin a commit instead of the branch tip, add `@<sha>` before the
+   subdirectory: `git+https://github.com/caktus/pipen@<sha>#subdirectory=cli`
+
+   `pipen up` renders the pod/Service templates from a checkout. Keep a
+   shallow clone and point `PIPEN_TEMPLATES` at it:
+
+   ```sh
+   git clone --depth 1 https://github.com/caktus/pipen ~/.local/share/pipen
+   export PIPEN_TEMPLATES=~/.local/share/pipen/devenv/templates   # for `pipen up`
    ```
 
 3. Work with pens:
@@ -114,6 +123,29 @@ An admin bootstraps you once (see Admins) and gives you the
 kata rootfs. A pod recreation resets pi to the image-baked version. To change
 the baked pi version for everyone, edit `devenv/Dockerfile`. The nightly build picks the change up. To run an older build, pin its tag with
 `pipen up --tag <tag>`.
+
+## Working on pipen
+
+If you edit this repo, work from a checkout instead of the GitHub install.
+
+1. Run the CLI from the checkout:
+
+   ```sh
+   uv run cli/pipen.py --help
+   ```
+
+   Running from the checkout finds `devenv/templates` on its own. It walks up
+   from your working directory. You do not set `PIPEN_TEMPLATES`
+
+2. If you want `pipen` on your PATH, install the local copy:
+
+   ```sh
+   uv tool install --force cli
+   ```
+
+   Outside the checkout, `up` needs `PIPEN_TEMPLATES` pointed at the checkout,
+   as in the developer steps above. Use `--force` on every reinstall so the
+   local copy replaces the GitHub one
 
 ## Admins
 
