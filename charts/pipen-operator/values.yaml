@@ -1,9 +1,14 @@
-# Operator image (full reference). REQUIRED:
-#   helm install pipen-operator charts/pipen-operator --set image=<ref>
-image: ""
+# Operator image (full reference). Defaults to the public GHCR package that
+# the publish-operator workflow maintains.
+image: "ghcr.io/caktus/pipen-operator:latest"
 
 # One replica; leader election is on so a future 2-replica flip is cheap.
 replicaCount: 1
+
+# Pod-level scheduling for the operator Deployment. Empty (the default):
+# the cluster scheduler picks. Set it to pin the operator to node(s) that
+# already hold a locally staged image, e.g. nodeSelector: {kubernetes.io/hostname: node1}
+nodeSelector: {}
 
 # Cluster shape, rendered into ConfigMap pipen-operator-config which the
 # operator reads (and watches: a change re-reconciles all pens).

@@ -5,7 +5,6 @@ metadata:
   namespace: pipen
   labels:
     app.kubernetes.io/name: pipen-operator
-{{ include "pipen-operator.requireImage" . }}
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
@@ -17,10 +16,14 @@ spec:
         app.kubernetes.io/name: pipen-operator
     spec:
       serviceAccountName: pipen-operator
+{{- with .Values.nodeSelector }}
+      nodeSelector:
+{{- toYaml . | nindent 8 }}
+{{- end }}
       containers:
         - name: operator
           image: {{ .Values.image | quote }}
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: {{ if hasSuffix ":latest" .Values.image }}Always{{ else }}IfNotPresent{{ end }}
           env:
             - name: POD_NAMESPACE
               valueFrom:

@@ -143,9 +143,26 @@ There is no in-cluster registry and no image build on a node anymore.
 
 ### 2. Install the operator (once per cluster)
 
+The operator image is published to the GHCR package
+`ghcr.io/caktus/pipen-operator` by this repo's GitHub Actions workflow
+(`.github/workflows/publish-operator.yml`) on every merge to main, nightly
+at 04:00 UTC, and on manual dispatch (Actions tab). Tags are the UTC date
+(`YYYYMMDD`) plus `latest`. A new tag appears only when the image content
+changed. The workflow keeps the 14 newest date tags and deletes the rest.
+The chart defaults to `ghcr.io/caktus/pipen-operator:latest`, so the
+install needs no `--set image`. The operator pod always pulls `latest`
+tags and uses `IfNotPresent` for pinned tags.
+
+One-time setup: open the package page for `caktus/pipen-operator` and set
+its visibility to **public**. GitHub creates packages pushed this way as
+private by default, and the operator pod pulls anonymously.
+
 ```sh
-helm install pipen-operator charts/pipen-operator --set image=<operator image>
+helm install pipen-operator charts/pipen-operator
 ```
+
+Or, from the chart repository (see the section below):
+`helm install pipen-operator pipen/pipen-operator`
 
 This creates, in namespace `pipen`:
 
@@ -165,6 +182,21 @@ This creates, in namespace `pipen`:
 
 Install it exactly once per cluster. Its cluster-scoped objects and the CRD
 belong to a single release.
+
+#### Building the operator image yourself
+
+To build the image yourself and pin the operator to the node(s) that hold
+it, add the flags to the install:
+
+```sh
+docker build -t <ref> operator/
+helm install pipen-operator charts/pipen-operator \
+  --set image=<ref> \
+  --set-json 'nodeSelector={"kubernetes.io/hostname":"<node>"}'
+```
+
+Use a full reference that does not end in `:latest`. The operator pod then
+uses `IfNotPresent` and runs the locally staged image instead of pulling.
 
 ### The chart repository (GitHub Pages)
 
