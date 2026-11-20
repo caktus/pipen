@@ -2,13 +2,13 @@
 id: PI-006
 github_issue: 6
 github_url: https://github.com/caktus/pipen/issues/6
-last_synced: '2026-11-20T17:02:00.593319+00:00'
+last_synced: "2026-11-20T17:02:06.119099+00:00"
 synced_hash: 67da2797c2ecddee049a74e4dd36b315cd993b218e7d02a8a4be347c785d3c0f
 title: Publish dev-namespace chart via GitHub Pages
 type: Feature
-assignee: '@me'
+assignee: "@me"
 labels:
-- phase/plan-ready
+  - phase/in-progress
 context:
   relates_to: []
 ---
@@ -18,14 +18,17 @@ As an admin, I want the `dev-namespace` chart published as a Helm repository on 
 Today the chart is installed by path from a checkout (`helm install <dev> charts/dev-namespace`). A CI workflow builds and tags the dev image on every merge to main; the chart has no equivalent.
 
 ### To Do
+
 - Add a chart-releaser publish workflow, enable Pages on the `gh-pages` branch, and enforce version bumps in CI
 
 ## AC
+
 - [ ] `helm repo add pipen https://caktus.github.io/pipen` lists `dev-namespace` and its published versions
 - [ ] A merge to main that bumps the `Chart.yaml` version publishes a release and the chart to Pages; a chart change without a bump publishes nothing and fails `verify.yml`
 - [ ] README documents the chart repo URL and the `helm install` flow by repo
 
 <!-- tickets:research -->
+
 Gathered 2026-07: codebase scout (inline files, this repo) and web research. Each finding cites its source.
 
 ## Chart and CI state (scout)
@@ -52,27 +55,32 @@ Gathered 2026-07: codebase scout (inline files, this repo) and web research. Eac
 - `cr index` and `cr` need `fetch-depth: 0` on checkout (tags), per the action README.
 
 <!-- tickets:approaches -->
+
 Three ways to get the chart onto a Pages-served repo:
 
 **A. `helm/chart-releaser-action` + `gh-pages` branch (recommended)**
 One workflow: on push to main, the action runs `cr` (creates a GitHub Release per new `Chart.yaml` version, skips existing versions) and `cr index --push` (writes `index.yaml` + `.tgz` into `gh-pages`). Enable Pages on `gh-pages` once.
+
 - Pro: maintained by the Helm org; does release + index + Pages branch in one action; `GITHUB_TOKEN` + `contents: write` is enough; version-bump-as-release is the standard, enforced pattern.
 - Pro: a GitHub Release per chart version is a useful artifact, not spam (one release per bump).
 - Con: one more external tool in the pipeline (`cr`), unlike the hand-rolled `publish.yml`.
 
 **B. Hand-rolled: `helm package` + `helm repo index --merge` + git push to `gh-pages`**
 Copy the `publish.yml` style: detect chart change, package, check out `gh-pages`, rebuild the index with `--merge`, commit, push.
+
 - Pro: no third-party action; matches house style.
 - Con: we own the index and the push-conflict handling; no releases; version bump is purely convention, easy to get wrong (re-packaging the same version silently overwrites the `.tgz` and leaves the old index entry).
 
 **C. Pages-artifact deploy (`upload-pages-artifact` + `deploy-pages`), tgz as release assets**
 Build the repo in CI, publish as a Pages artifact, index at the site root, `.tgz` referenced by release-asset URL.
+
 - Pro: no `gh-pages` branch; the modern Pages flow.
 - Con: needs releases anyway (for the tgz assets) plus the `github-pages` environment and OIDC (`id-token: write`); index at site root only; the most moving parts of the three.
 
 **Recommendation: A.** It is the official tooling for exactly this job, it needs the fewest lines of our code, and its "bump `Chart.yaml` to release" model is enforced by the tool rather than by discipline. We add a small check to `verify.yml` so a PR that touches `charts/` must bump the version, keeping the pattern honest.
 
 <!-- tickets:plan -->
+
 Approach A (chart-releaser). Conventions: Conventional Commits, Simple English, `pre-commit run --all-files` before each commit, no `pull_request` trigger on the publish workflow.
 
 ### Task 1: Publish workflow + first version bump
@@ -97,7 +105,7 @@ Files: create `.github/workflows/publish-chart.yml`; modify `charts/dev-namespac
       steps:
         - uses: actions/checkout@v4
           with:
-            fetch-depth: 0   # cr needs tags
+            fetch-depth: 0 # cr needs tags
         - uses: helm/chart-releaser-action@v1
           env:
             CR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -109,6 +117,7 @@ Files: create `.github/workflows/publish-chart.yml`; modify `charts/dev-namespac
   ```
 
   Behavior: no new `Chart.yaml` version → no release, run is green. New version → GitHub Release `dev-namespace-<version>` plus `dev-namespace-<version>.tgz` and `index.yaml` committed to the `gh-pages` branch.
+
 - Verify: merge the bump to main, then `gh release view dev-namespace-0.2.0` and `git ls-remote origin gh-pages` (or the branch contents) show the tgz + `index.yaml`.
 - Commit: `ci: publish the dev-namespace chart on version bumps`
 
