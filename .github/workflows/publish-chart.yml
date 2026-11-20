@@ -46,9 +46,31 @@ jobs:
           git config user.email "${GITHUB_ACTOR}@users.noreply.github.com"
 
       - name: Run chart-releaser
+        id: releaser
         uses: helm/chart-releaser-action@v1.9.0
         with:
           charts_dir: charts
           packages_with_index: true # index.yaml and the .tgz on gh-pages
         env:
           CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+
+      - name: Render the chart index page
+        # A human-readable landing page for the site root. Pages serves
+        # index.html for the directory and index.yaml for helm clients
+        # side by side. Runs after chart-releaser so a fresh publish lands
+        # under the listing. Skips the commit when nothing changed.
+        if: steps.releaser.outputs.changed_charts != ''
+        run: |
+          # render before switching branches: the detached gh-pages
+          # checkout replaces the worktree, which holds charts/ and this script
+          python3 "${GITHUB_WORKSPACE}/scripts/chart_index.py" > index.html.new
+          git fetch origin gh-pages
+          git checkout --detach origin/gh-pages
+          mv index.html.new index.html
+          if [ -z "$(git status --porcelain index.html)" ]; then
+            echo "index.html unchanged"
+            exit 0
+          fi
+          git add index.html
+          git commit -m "docs: refresh the chart index page"
+          git push origin HEAD:gh-pages
