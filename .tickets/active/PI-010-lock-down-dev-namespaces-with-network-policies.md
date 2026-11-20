@@ -2,7 +2,7 @@
 id: PI-010
 github_issue: 10
 github_url: https://github.com/caktus/pipen/issues/10
-last_synced: "2026-11-20T18:34:08.147383+00:00"
+last_synced: "2026-11-20T18:39:34.604427+00:00"
 synced_hash: 68888f60e27ca9560c29cb97ee2e777a5358ce44a2266238958a7fe625c74ec9
 title: Lock down dev namespaces with network policies
 type: Feature
