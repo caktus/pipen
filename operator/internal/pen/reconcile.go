@@ -156,12 +156,19 @@ func (r *Reconciler) ensureService(ctx context.Context, pen *v1alpha1.Pen, cfg c
 		return err
 	}
 	lbClass := cfg.LoadBalancerClass
+	// Start from the config annotations, then set the per-pen MagicDNS
+	// request name on top (it is per-pen, so it cannot live in config).
+	annotations := make(map[string]string, len(cfg.ServiceAnnotations)+1)
+	for k, v := range cfg.ServiceAnnotations {
+		annotations[k] = v
+	}
+	annotations["tailscale.com/hostname"] = pen.Name
 	svc = &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        key.Name,
 			Namespace:   pen.Namespace,
 			Labels:      map[string]string{ownerLabel: pen.Name},
-			Annotations: cfg.ServiceAnnotations,
+			Annotations: annotations,
 		},
 		Spec: corev1.ServiceSpec{
 			Type:              corev1.ServiceTypeLoadBalancer,

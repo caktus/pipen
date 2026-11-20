@@ -46,8 +46,7 @@ func testConfig() config.Config {
 		NodeSelector: map[string]string{"openebs.io/engine": "mayastor"},
 		StorageClass: "mayastor-2",
 		ServiceAnnotations: map[string]string{
-			"tailscale.com/expose":   "true",
-			"tailscale.com/hostname": penName,
+			"tailscale.com/expose": "true",
 		},
 		TailnetDomain:     "ts.example.net",
 		ImagePullPolicy:   "IfNotPresent",
@@ -219,6 +218,10 @@ func TestReconcileCreatesObjects(t *testing.T) {
 	}
 	if svc.Annotations["tailscale.com/expose"] != "true" {
 		t.Errorf("service annotations = %v, want tailscale.com/expose=true", svc.Annotations)
+	}
+	if svc.Annotations["tailscale.com/hostname"] != penName {
+		t.Errorf("service hostname annotation = %q, want %q (set per pen by the operator)",
+			svc.Annotations["tailscale.com/hostname"], penName)
 	}
 	if len(svc.OwnerReferences) != 1 || svc.OwnerReferences[0].Kind != "Pen" {
 		t.Errorf("service ownerRefs = %+v, want one Pen ownerRef", svc.OwnerReferences)
