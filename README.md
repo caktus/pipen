@@ -149,8 +149,11 @@ helm install pipen-operator charts/pipen-operator --set image=<operator image>
 
 This creates, in namespace `pipen`:
 
-- The `pens.pipen.dev/v1alpha1` Pen CRD (applied at install only; `helm
-upgrade` never updates CRD schemas, and v1alpha1 is frozen for now)
+- The `pens.pipen.dev/v1alpha1` Pen CRD. It is a release-managed resource
+  (`templates/crd.yaml`): Helm installs it on Helm 3 and Helm 4 alike, and
+  `helm upgrade` keeps it in sync. While v1alpha1 is frozen the rendered
+  manifest never changes, so upgrades are no-ops. Do not remove the CRD
+  from the chart: Helm would delete it
 - ServiceAccount + Deployment (one replica; leader election is on)
 - A cluster-scoped READ-ONLY ClusterRole/RoleBinding on Pens only, and the
   leader-election Role in `pipen`

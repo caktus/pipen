@@ -12,6 +12,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/discovery"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -47,7 +48,22 @@ func main() {
 		fatal(err)
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	cfg := ctrl.GetConfigOrDie()
+	ctx := ctrl.SetupSignalHandler()
+	d, err := discovery.NewDiscoveryClientForConfig(cfg)
+	if err != nil {
+		fatal(err)
+	}
+	ok, err := crdGroupAvailable(ctx, d)
+	if err != nil {
+		fatal(err)
+	}
+	if !ok {
+		fmt.Fprintln(os.Stderr, "pipen-operator: the pens.pipen.dev CRD is not installed on this cluster. The pipen-operator chart installs it (templates/crd.yaml): helm install pipen-operator charts/pipen-operator")
+		os.Exit(1)
+	}
+
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsserver.Options{BindAddress: "0"}, // no metrics in the MVP
 		HealthProbeBindAddress: ":8081",
@@ -97,10 +113,26 @@ func main() {
 		fatal(err)
 	}
 
-	ctx := ctrl.SetupSignalHandler()
 	if err := mgr.Start(ctx); err != nil {
 		fatal(err)
 	}
+}
+
+// crdGroupAvailable reports whether the pens.pipen.dev API group is served
+// by the cluster. A missing CRD names itself at startup instead of
+// surfacing later as an opaque Pen informer failure.
+func crdGroupAvailable(ctx context.Context, d discovery.DiscoveryInterface) (bool, error) {
+	groups, err := d.ServerGroups()
+	if err != nil {
+		return false, err
+	}
+	want := v1alpha1.GroupVersion.Group
+	for _, g := range groups.Groups {
+		if g.Name == want {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // penOperatorReconciler reads the operator config once per pass (fresh via
