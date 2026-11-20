@@ -76,6 +76,39 @@ chown "${DEV_USER}:${DEV_USER}" "${DEV_HOME}/.bashrc"
 # --- dockerd (background; data-root on the ephemeral rootfs by design) ------
 dockerd > /var/log/dockerd.log 2>&1 &
 
+# --- per-env ssh host keys (stable across pod recreation) --------------------
+# The image bakes one static host-key set (ssh-keygen -A, under /etc/ssh on the
+# ephemeral kata rootfs), so every env presents the same key and host-key
+# verification cannot tell envs apart. On first boot, generate a set for this
+# env on the /home PVC (which survives pod recreation), then copy it onto the
+# /etc/ssh/ssh_host_*_key paths before sshd starts. The base sshd_config leaves
+# the HostKey lines commented out, so sshd loads exactly those paths. The env
+# shows its own key from its first boot and keeps it for its whole life, so a
+# client sees one known_hosts prompt per env, ever.
+HOST_KEYS_DIR="/home/.herdr/ssh-host-keys"
+install -d -m 700 "${HOST_KEYS_DIR}"
+ensure_ssh_host_key() {
+    # $1 is a key type (ed25519, ecdsa, rsa). Create the key on the PVC if it
+    # is missing or if a half-written file fails the load test, re-derive its
+    # .pub when it is missing or does not match, then copy both onto the
+    # distro-default /etc/ssh path sshd reads.
+    local key_type="$1"
+    local host_key="${HOST_KEYS_DIR}/ssh_host_${key_type}_key"
+    if [ ! -f "${host_key}" ] || ! ssh-keygen -y -f "${host_key}" >/dev/null 2>&1; then
+        rm -f "${host_key}" "${host_key}.pub"
+        ssh-keygen -q -t "${key_type}" -N '' -f "${host_key}"
+    fi
+    if [ ! -f "${host_key}.pub" ] || \
+        ! cmp -s <(ssh-keygen -y -f "${host_key}") "${host_key}.pub"; then
+        ssh-keygen -y -f "${host_key}" > "${host_key}.pub"
+    fi
+    install -m 600 "${host_key}" "/etc/ssh/ssh_host_${key_type}_key"
+    install -m 644 "${host_key}.pub" "/etc/ssh/ssh_host_${key_type}_key.pub"
+}
+for key_type in ed25519 ecdsa rsa; do
+    ensure_ssh_host_key "${key_type}"
+done
+
 # --- sshd (foreground, key-only, no root login) ------------------------------
 install -d /run/sshd
 cat > /etc/ssh/sshd_config.d/99-herdr.conf <<'EOF'

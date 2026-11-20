@@ -110,6 +110,20 @@ An admin bootstraps you once (see Admins) and gives you the
   touches the PVC. The role for your token holds no pvc delete. That role is
   enforced when the cluster runs `--authorization-mode=RBAC`
 
+### ssh host keys
+
+Each pen presents its own ssh host key. The key lives on the `/home` PVC, so
+it survives pod recreation. The pen generates the key on its first boot and
+reuses it on every later boot. You get one `known_hosts` prompt per pen, not
+one per boot.
+
+The first image that gives each pen its own host key changes what an existing
+pen presents. On the next boot after that image is live, the pen switches from
+the old shared key to its own key. You get one `known_hosts` prompt for each
+existing pen at that switch. After the prompt, the key stays the same for the
+life of the pen. Wiping the home data destroys the key, and the next boot
+presents a new one with one more prompt.
+
 ### Updating pi inside a pen
 
 `pi update` works inside a pen. The image bakes pi into its own npm prefix
