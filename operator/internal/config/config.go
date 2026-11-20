@@ -33,6 +33,9 @@ type Config struct {
 	ImagePullPolicy string
 	// LoadBalancerClass is set on each pen Service (tailscale).
 	LoadBalancerClass string
+	// RuntimeClass is the pod runtime class (kata). Empty means no runtime
+	// class at all (clusters that run no kata runtime, e.g. kind e2e).
+	RuntimeClass string
 }
 
 // FromData builds a Config from ConfigMap data keys, applying defaults.
@@ -45,6 +48,7 @@ func FromData(data map[string]string) (Config, error) {
 		ServiceAnnotations: map[string]string{},
 		ImagePullPolicy:    "IfNotPresent",
 		LoadBalancerClass:  "tailscale",
+		RuntimeClass:       "kata",
 	}
 	for k, v := range data {
 		switch k {
@@ -62,6 +66,8 @@ func FromData(data map[string]string) (Config, error) {
 			cfg.ImagePullPolicy = v
 		case "loadBalancerClass":
 			cfg.LoadBalancerClass = v
+		case "runtimeClass":
+			cfg.RuntimeClass = v
 		case "storageClass":
 			cfg.StorageClass = v
 		case "nodeSelector":

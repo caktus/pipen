@@ -36,3 +36,6 @@ config:
   imagePullPolicy: "IfNotPresent"
   # loadBalancerClass for pen Services (the Tailscale operator).
   loadBalancerClass: "tailscale"
+  # Runtime class for env pods (kata). Empty (no runtime class) for
+  # clusters that run no kata runtime, e.g. the kind e2e job.
+  runtimeClass: "kata"

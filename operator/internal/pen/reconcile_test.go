@@ -51,6 +51,7 @@ func testConfig() config.Config {
 		TailnetDomain:     "ts.example.net",
 		ImagePullPolicy:   "IfNotPresent",
 		LoadBalancerClass: "tailscale",
+		RuntimeClass:      "kata",
 	}
 }
 
@@ -129,7 +130,12 @@ func reconcileOnce(t *testing.T, c client.Client) reconcile.Result {
 
 func reconcileOnceIn(t *testing.T, c client.Client, ns string) reconcile.Result {
 	t.Helper()
-	r := &Reconciler{Client: c, Reader: c, Scheme: testScheme(t), Config: testConfig()}
+	return reconcileOnceWith(t, c, ns, testConfig())
+}
+
+func reconcileOnceWith(t *testing.T, c client.Client, ns string, cfg config.Config) reconcile.Result {
+	t.Helper()
+	r := &Reconciler{Client: c, Reader: c, Scheme: testScheme(t), Config: cfg}
 	res, err := r.Reconcile(context.Background(),
 		reconcile.Request{NamespacedName: types.NamespacedName{Name: penName, Namespace: ns}})
 	if err != nil {
@@ -295,6 +301,40 @@ func TestReconcileCreatesObjects(t *testing.T) {
 	}
 	if res.RequeueAfter == 0 {
 		t.Error("expected requeue while creating")
+	}
+}
+
+// An empty runtimeClass (the kind e2e cluster shape) must leave the pod
+// with no runtime class: kind nodes run no kata runtime.
+func TestReconcileNoRuntimeClass(t *testing.T) {
+	cfg := testConfig()
+	cfg.RuntimeClass = ""
+	objs := append([]client.Object{ownedNS(t, devNS), newPen()}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, cfg)
+	pod := &corev1.Pod{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, pod); err != nil {
+		t.Fatal(err)
+	}
+	if pod.Spec.RuntimeClassName != nil {
+		t.Errorf("pod runtimeClass = %q, want none", *pod.Spec.RuntimeClassName)
+	}
+}
+
+// A non-default runtime class must be used as configured: the old code
+// hardcoded kata, so only a non-default value proves the config is read.
+func TestReconcileCustomRuntimeClass(t *testing.T) {
+	cfg := testConfig()
+	cfg.RuntimeClass = "gvisor"
+	objs := append([]client.Object{ownedNS(t, devNS), newPen()}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, cfg)
+	pod := &corev1.Pod{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, pod); err != nil {
+		t.Fatal(err)
+	}
+	if pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName != "gvisor" {
+		t.Errorf("pod runtimeClass = %v, want gvisor", pod.Spec.RuntimeClassName)
 	}
 }
 

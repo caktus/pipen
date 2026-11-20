@@ -234,7 +234,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, pen *v1alpha1.Pen, image str
 	cmKey := "herdr-dev-" + pen.Namespace
 	nodeSelector := cfg.NodeSelector
 	spec := corev1.PodSpec{
-		RuntimeClassName: strPtr("kata"),
+		RuntimeClassName: runtimeClassPtr(cfg.RuntimeClass),
 		RestartPolicy:    corev1.RestartPolicyAlways,
 		NodeSelector:     nodeSelector,
 		Containers: []corev1.Container{{
@@ -362,6 +362,15 @@ func orDefault(v, def string) string {
 }
 
 func strPtr(s string) *string { return &s }
+
+// runtimeClassPtr: an empty runtime class must be a nil pointer (no
+// runtime class at all), not a pointer to "".
+func runtimeClassPtr(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return strPtr(s)
+}
 
 // pullPolicy: `latest` tags must pull (the registry image is rebuilt
 // nightly); pinned tags follow the operator config.

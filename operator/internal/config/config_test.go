@@ -17,6 +17,7 @@ func TestFromDataFull(t *testing.T) {
 		"tailnetDomain":      "ts.example.net",
 		"imagePullPolicy":    "Always",
 		"loadBalancerClass":  "tailscale",
+		"runtimeClass":       "kata",
 	})
 	if err != nil {
 		t.Fatalf("FromData: %v", err)
@@ -32,6 +33,7 @@ func TestFromDataFull(t *testing.T) {
 		TailnetDomain:      "ts.example.net",
 		ImagePullPolicy:    "Always",
 		LoadBalancerClass:  "tailscale",
+		RuntimeClass:       "kata",
 	}
 	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("cfg = %+v, want %+v", cfg, want)
@@ -51,6 +53,32 @@ func TestFromDataMinimal(t *testing.T) {
 	}
 	if cfg.LoadBalancerClass != "tailscale" {
 		t.Errorf("loadBalancerClass = %q, want tailscale", cfg.LoadBalancerClass)
+	}
+	if cfg.RuntimeClass != "kata" {
+		t.Errorf("runtimeClass = %q, want kata", cfg.RuntimeClass)
+	}
+}
+
+func TestFromDataCustomRuntimeClass(t *testing.T) {
+	cfg, err := FromData(map[string]string{
+		"image":        "ghcr.io/caktus/pipen:latest",
+		"runtimeClass": "gvisor",
+	})
+	if err != nil {
+		t.Fatalf("FromData: %v", err)
+	}
+	if cfg.RuntimeClass != "gvisor" {
+		t.Errorf("runtimeClass = %q, want gvisor", cfg.RuntimeClass)
+	}
+}
+
+func TestFromDataEmptyRuntimeClass(t *testing.T) {
+	cfg, err := FromData(map[string]string{"image": "ghcr.io/caktus/pipen:latest", "runtimeClass": ""})
+	if err != nil {
+		t.Fatalf("FromData: %v", err)
+	}
+	if cfg.RuntimeClass != "" {
+		t.Errorf("runtimeClass = %q, want empty (no runtime class)", cfg.RuntimeClass)
 	}
 }
 

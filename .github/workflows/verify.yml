@@ -1,7 +1,8 @@
 # CI for pipen: the full pre-commit hook suite, both charts (helm lint +
 # template render + client-side parse), the pipen CLI (lockfile check +
-# smoke), and a full image build of devenv/ so a broken toolchain build is
-# caught before it reaches the cluster.
+# smoke), a kind e2e run that installs both charts and drives a pen through
+# its lifecycle, and a full image build of devenv/ so a broken toolchain
+# build is caught before it reaches the cluster.
 
 name: verify
 
@@ -152,3 +153,174 @@ jobs:
           load: true
           cache-from: type=gha,scope=pipen-operator-image
           cache-to: type=gha,scope=pipen-operator-image,mode=max
+
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install kind
+        run: |
+          kind_version=0.27.0
+          curl -fsSL "https://kind.sigs.k8s.io/dl/v${kind_version}/kind-linux-amd64" -o kind
+          sudo install kind /usr/local/bin/kind
+      - name: Install kubectl
+        run: |
+          # match the kind node image (kind 0.27 ships k8s 1.33)
+          kubectl_version=v1.33.1
+          curl -fsSL "https://dl.k8s.io/release/${kubectl_version}/bin/linux/amd64/kubectl" -o kubectl
+          sudo install kubectl /usr/local/bin/kubectl
+      - name: Install helm
+        run: |
+          helm_version=3.16.4
+          curl -fsSL "https://get.helm.sh/helm-v${helm_version}-linux-amd64.tar.gz" | tar xz
+          sudo install linux-amd64/helm /usr/local/bin/helm
+      - name: Create the kind cluster
+        run: kind create cluster --name e2e
+      - name: Build the operator image
+        run: docker build -t pipen-operator:e2e operator/
+      - name: Load the operator image into kind
+        run: kind load docker-image pipen-operator:e2e --name e2e
+      - name: Install both charts with kind-shaped values
+        run: |
+          # kind shape: the long-running pause image, the kind default
+          # storage class, a small pod, no runtime class (kind runs no
+          # kata). nodeSelector and serviceAnnotations cannot be cleared
+          # with --set or a values file (helm deep-merges maps), so the
+          # config is patched to the kind shape after the install.
+          helm install operator charts/pipen-operator \
+            --set image=pipen-operator:e2e \
+            --set config.image=registry.k8s.io/pause:3.10 \
+            --set config.homeSize=1Gi \
+            --set config.cpu=100m \
+            --set config.memory=128Mi \
+            --set config.storageClass=standard \
+            --set config.runtimeClass=
+          kubectl -n pipen patch configmap pipen-operator-config \
+            --type merge -p '{"data":{"nodeSelector":"{}","serviceAnnotations":"{}"}}'
+          helm install ci-dev charts/dev-namespace \
+            --set dev=ci \
+            --set 'authorizedKeys[0]=ssh-ed25519 AAAACIKEY e2e'
+      - name: Create the dev bootstrap ConfigMap
+        run: |
+          # the dev-namespace README hands this step to the admin; the
+          # env pod's dev-config volume requires all three keys
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: herdr-dev-env-ci
+            namespace: env-ci
+          data:
+            models.json: "[]"
+            settings.json: "{}"
+            litellm_key: "sk-e2e"
+          EOF
+      - name: The operator Deployment is ready
+        run: kubectl -n pipen rollout status deploy/pipen-operator --timeout=180s
+      - name: Read the dev token and build its kubeconfig
+        run: |
+          # the token controller populates data.token asynchronously
+          token=""
+          for i in $(seq 1 30); do
+            token=$(kubectl -n env-ci get secret deploy-token \
+              -o jsonpath='{.data.token}' 2>/dev/null | base64 -d || true)
+            [ -n "$token" ] && break
+            sleep 2
+          done
+          [ -n "$token" ] || { echo "deploy-token was never populated" >&2; exit 1; }
+          # kind's kubeconfig carries a cluster-admin client cert, and
+          # kubectl presents that cert even when --token is set. The dev
+          # assertions must run as the dev ServiceAccount, so the dev
+          # steps use a token-only kubeconfig instead of --token.
+          server=$(kind get kubeconfig --name e2e | grep -oE 'https://127\.0\.0\.1:[0-9]+' | head -1)
+          [ -n "$server" ] || { echo "kind cluster server not found in the kubeconfig" >&2; exit 1; }
+          cat > "$RUNNER_TEMP/dev-kubeconfig" <<EOF
+          apiVersion: v1
+          kind: Config
+          clusters:
+            - cluster:
+                server: $server
+                insecure-skip-tls-verify: true
+              name: e2e
+          contexts:
+            - context:
+                cluster: e2e
+                user: dev
+              name: e2e
+          current-context: e2e
+          users:
+            - name: dev
+              user:
+                token: $token
+          EOF
+          echo "DEV_KUBECONFIG=$RUNNER_TEMP/dev-kubeconfig" >> "$GITHUB_ENV"
+      - name: The dev token cannot create pods
+        run: |
+          # raw pod create is how the dev token could once spawn any
+          # privileged pod; it must stay denied against the rendered Role
+          [ "$(kubectl --kubeconfig "$DEV_KUBECONFIG" auth can-i create pods -n env-ci)" = "no" ]
+      - name: The dev token can create Pens
+        run: |
+          # the resource is addressed by bare name: kubectl cannot express
+          # the dotted group pens.pipen.dev in a resource string
+          [ "$(kubectl --kubeconfig "$DEV_KUBECONFIG" auth can-i create pens -n env-ci)" = "yes" ]
+      - name: Create the pen as the dev token
+        run: |
+          cat <<'EOF' | kubectl --kubeconfig "$DEV_KUBECONFIG" apply -f -
+          apiVersion: pens.pipen.dev/v1alpha1
+          kind: Pen
+          metadata:
+            name: smoke
+            namespace: env-ci
+          spec: {}
+          EOF
+      - name: The PVC, Service and Pod appear
+        run: |
+          # the operator reconciles on its own schedule; allow it a moment
+          for i in $(seq 1 30); do
+            kubectl -n env-ci get pvc smoke-home >/dev/null 2>&1 \
+              && kubectl -n env-ci get service smoke >/dev/null 2>&1 \
+              && kubectl -n env-ci get pod env-smoke >/dev/null 2>&1 \
+              && break
+            sleep 2
+          done
+          kubectl -n env-ci get pvc smoke-home
+          kubectl -n env-ci get service smoke
+          kubectl -n env-ci get pod env-smoke
+      - name: The pod is ready
+        run: kubectl -n env-ci wait --for=condition=Ready pod/env-smoke --timeout=180s
+      - name: Ready via the patched loadBalancer ingress
+        run: |
+          # kind runs no Tailscale operator, so the tailnet hostname is
+          # simulated through the Service status subresource (the main
+          # resource drops client status writes); the reconciler reports
+          # the ingress hostname it reads
+          kubectl -n env-ci patch service smoke --subresource status --type merge \
+            -p '{"status":{"loadBalancer":{"ingress":[{"hostname":"smoke.ts.e2e"}]}}}'
+          phase=""
+          for i in $(seq 1 60); do
+            phase=$(kubectl -n env-ci get pen smoke -o jsonpath='{.status.phase}')
+            [ "$phase" = "Ready" ] && break
+            sleep 2
+          done
+          [ "$phase" = "Ready" ] || { echo "pen phase = $phase, want Ready" >&2; exit 1; }
+          hostname=$(kubectl -n env-ci get pen smoke -o jsonpath='{.status.hostname}')
+          [ "$hostname" = "smoke.ts.e2e" ] \
+            || { echo "pen hostname = $hostname, want smoke.ts.e2e" >&2; exit 1; }
+          echo "pen Ready at $hostname"
+      - name: Deletion leaves the PVC
+        run: |
+          # the pen and its pod/Service are owned by the Pen and are
+          # garbage-collected with it; the home PVC is deliberately not
+          # owned, so the dev's data survives a pen deletion
+          kubectl --kubeconfig "$DEV_KUBECONFIG" -n env-ci delete pen smoke --wait=false
+          for i in $(seq 1 60); do
+            kubectl -n env-ci get pod env-smoke >/dev/null 2>&1 || break
+            sleep 2
+          done
+          kubectl -n env-ci get pod env-smoke 2>/dev/null \
+            && { echo "pod env-smoke still present" >&2; exit 1; }
+          kubectl -n env-ci get service smoke 2>/dev/null \
+            && { echo "service smoke still present" >&2; exit 1; }
+          kubectl -n env-ci get pvc smoke-home

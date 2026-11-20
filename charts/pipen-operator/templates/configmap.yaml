@@ -20,3 +20,4 @@ data:
   tailnetDomain: {{ .Values.config.tailnetDomain | quote }}
   imagePullPolicy: {{ .Values.config.imagePullPolicy | quote }}
   loadBalancerClass: {{ .Values.config.loadBalancerClass | quote }}
+  runtimeClass: {{ .Values.config.runtimeClass | quote }}
