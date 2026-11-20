@@ -31,7 +31,8 @@ Or from a repo checkout: `helm install <dev> charts/dev-namespace ...`.
   create, no pvc delete)
 - `Role`/`RoleBinding` `pipen-operator` (in the same namespace): the
   per-namespace writes for the operator's ServiceAccount (pods, services, pvc
-  create, pens/status update, configmap/secret get)
+  create, pens/status update, configmap/secret get, plus reads on all of
+  them)
 - `Secret` `deploy-token` (`kubernetes.io/service-account-token`); the token
   controller fills `data.token` after a delay
 - `Secret` `herdr-dev-<dev>`: the ssh public keys
