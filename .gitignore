@@ -225,3 +225,6 @@ __marimo__/
 
 # Agent skills (installed locally per skills-lock.json; the lock is tracked at the repo root)
 .agents/skills/
+
+# git worktrees (isolated feature workspaces)
+.worktrees/
