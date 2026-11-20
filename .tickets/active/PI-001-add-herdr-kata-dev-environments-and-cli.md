@@ -2,8 +2,8 @@
 id: PI-001
 github_issue: 1
 github_url: https://github.com/caktus/pipen/issues/1
-last_synced: "2026-11-20T14:51:16.483444+00:00"
-synced_hash: c81aff0d943606de2e84dbde6fa004b38d5bcb1fe9ced1993bf9a63b9b05426e
+last_synced: "2026-11-20T15:37:49.945806+00:00"
+synced_hash: 7c5c22b65739ce6cebd9da832c73dd9283cef8640eca85b492959081550639ec
 title: Add herdr kata dev environments and CLI
 type: Feature
 assignee: "@me"

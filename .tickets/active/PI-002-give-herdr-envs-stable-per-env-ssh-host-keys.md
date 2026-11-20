@@ -2,8 +2,8 @@
 id: PI-002
 github_issue: 2
 github_url: https://github.com/caktus/pipen/issues/2
-last_synced: "2026-11-20T14:51:19.945900+00:00"
-synced_hash: ac878b5f27a73e001105fde70ef238c8bae251565378303402c580a7940c7e9a
+last_synced: "2026-11-20T15:37:52.224207+00:00"
+synced_hash: 9f6a4cc505128d9066351149a90384ec9e933261b1bb3b9b33a7837de0fa8f5e
 title: Give herdr envs stable per-env ssh host keys
 type: Task
 assignee: "@me"
