@@ -10,7 +10,7 @@ import (
 
 // crdPath points at the generated CRD manifest in the operator chart.
 func crdPath() string {
-	return filepath.Join("..", "..", "..", "charts", "pipen-operator", "crds", "pens.pipen.dev.yaml")
+	return filepath.Join("..", "..", "..", "charts", "pipen-operator", "templates", "crd.yaml")
 }
 
 func loadCRD(t *testing.T) map[string]any {
