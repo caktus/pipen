@@ -8,7 +8,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: default-deny-ingress
-  namespace: {{ .Values.dev | quote }}
+  namespace: {{ include "dev-namespace.name" . | quote }}
   labels:
     {{- include "dev-namespace.labels" . | nindent 4 }}
 spec:

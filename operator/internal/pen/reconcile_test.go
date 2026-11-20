@@ -124,10 +124,14 @@ func svcWithIngress(hostname, ip string) *corev1.Service {
 }
 
 func reconcileOnce(t *testing.T, c client.Client) reconcile.Result {
+	return reconcileOnceIn(t, c, devNS)
+}
+
+func reconcileOnceIn(t *testing.T, c client.Client, ns string) reconcile.Result {
 	t.Helper()
 	r := &Reconciler{Client: c, Reader: c, Scheme: testScheme(t), Config: testConfig()}
 	res, err := r.Reconcile(context.Background(),
-		reconcile.Request{NamespacedName: types.NamespacedName{Name: penName, Namespace: devNS}})
+		reconcile.Request{NamespacedName: types.NamespacedName{Name: penName, Namespace: ns}})
 	if err != nil {
 		t.Fatalf("Reconcile error: %v", err)
 	}
@@ -331,6 +335,71 @@ func TestReconcileIPFallback(t *testing.T) {
 	}
 	if p.Status.Phase != v1alpha1.PhaseReady {
 		t.Errorf("phase = %q, want Ready", p.Status.Phase)
+	}
+}
+
+// The dev-namespace chart names the namespace <namespacePrefix><dev>
+// (default "env-<dev>"). The operator derives every object name from the
+// Pen's namespace; the herdr.dev/owner label keeps the bare dev identity.
+func TestReconcilePrefixedNamespace(t *testing.T) {
+	ns := "env-" + devNS
+	owned := ownedNS(t, ns)
+	owned.Labels[ownerLabelKey] = devNS
+	pen := &v1alpha1.Pen{
+		ObjectMeta: metav1.ObjectMeta{Name: penName, Namespace: ns, Generation: 1},
+		Spec:       v1alpha1.PenSpec{},
+	}
+	objs := append([]client.Object{owned, pen}, devObjects(ns)...)
+	c := newClient(t, objs...)
+	res := reconcileOnceIn(t, c, ns)
+	ctx := context.Background()
+
+	pvc := &corev1.PersistentVolumeClaim{}
+	if err := c.Get(ctx, types.NamespacedName{Name: penName + "-home", Namespace: ns}, pvc); err != nil {
+		t.Fatalf("pvc not created in %s: %v", ns, err)
+	}
+	svc := &corev1.Service{}
+	if err := c.Get(ctx, types.NamespacedName{Name: penName, Namespace: ns}, svc); err != nil {
+		t.Fatalf("service not created in %s: %v", ns, err)
+	}
+	pod := &corev1.Pod{}
+	if err := c.Get(ctx, types.NamespacedName{Name: "env-" + penName, Namespace: ns}, pod); err != nil {
+		t.Fatalf("pod not created in %s: %v", ns, err)
+	}
+
+	envs := map[string]string{}
+	for _, e := range pod.Spec.Containers[0].Env {
+		envs[e.Name] = e.Value
+	}
+	if envs["DEV_USER"] != ns {
+		t.Errorf("DEV_USER = %q, want the namespace name %q", envs["DEV_USER"], ns)
+	}
+	secVol := ""
+	cmVol := ""
+	for _, v := range pod.Spec.Volumes {
+		if v.Secret != nil {
+			secVol = v.Secret.SecretName
+		}
+		if v.ConfigMap != nil {
+			cmVol = v.ConfigMap.Name
+		}
+	}
+	if secVol != "herdr-dev-"+ns {
+		t.Errorf("dev-secret volume = %q, want herdr-dev-%s", secVol, ns)
+	}
+	if cmVol != "herdr-dev-"+ns {
+		t.Errorf("dev-config volume = %q, want herdr-dev-%s", cmVol, ns)
+	}
+
+	p := &v1alpha1.Pen{}
+	if err := c.Get(ctx, types.NamespacedName{Name: penName, Namespace: ns}, p); err != nil {
+		t.Fatalf("get pen: %v", err)
+	}
+	if p.Status.Phase != v1alpha1.PhaseCreating {
+		t.Errorf("phase = %q, want Creating (pod not ready yet)", p.Status.Phase)
+	}
+	if res.RequeueAfter == 0 {
+		t.Error("expected requeue while creating")
 	}
 }
 

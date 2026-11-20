@@ -8,7 +8,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: deploy
-  namespace: {{ .Values.dev | quote }}
+  namespace: {{ include "dev-namespace.name" . | quote }}
   labels:
     {{- include "dev-namespace.labels" . | nindent 4 }}
 rules:

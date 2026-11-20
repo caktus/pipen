@@ -3,10 +3,10 @@
 #
 # Projects the per-env inputs, then runs dockerd (background) and sshd
 # (foreground, key-only):
-#   /run/herdr/secret/authorized_keys  — dev Secret `herdr-dev-<dev>` (bootstrap)
+#   /run/herdr/secret/authorized_keys  — dev Secret `herdr-dev-<namespace>` (bootstrap)
 #   /run/herdr/config/{models.json,settings.json,litellm_key}
 #                                       — env ConfigMap built from
-#                                         `herdr-dev-<dev>` (bootstrap)
+#                                         `herdr-dev-<namespace>` (bootstrap)
 # Env: DEV_USER (required), TAILNET_HOSTNAME (informational).
 #
 # /home is the per-env mayastor-2 PVC: the dev user's home lives there and

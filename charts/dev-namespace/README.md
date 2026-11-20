@@ -20,18 +20,19 @@ Or from a repo checkout: `helm install <dev> charts/dev-namespace ...`.
 
 ## Values
 
-| Name                  | Type   | Description                                                                                                                                                                |
-| --------------------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `dev`                 | string | Developer name. Becomes the namespace name. RFC 1123.                                                                                                                      |
-| `authorizedKeys`      | list   | ssh public keys, written to the `authorized_keys` Secret key of `herdr-dev-<dev>`.                                                                                         |
-| `operator.namespace`  | string | Namespace of the cluster-wide operator that the chart grants per-namespace write access to (default `pipen`).                                                              |
-| `tailscale.namespace` | string | Namespace where the tailscale-operator L3 ssh proxy runs. The ingress policy allows it to reach env pods on port 22 (default `tailscale`).                                 |
-| `egress.cidrAllows`   | list   | Fixed CIDR ranges a dev pod may reach, as strings. For example `100.64.0.0/10`, the tailscale CGNAT.                                                                       |
-| `egress.podAllows`    | list   | In-cluster targets a dev pod may reach. Each entry is `namespace`, `podSelector` (a label map), and `port`. Omit `port` to allow all ports. For example the litellm proxy. |
+| Name                  | Type   | Description                                                                                                                                                                                  |
+| --------------------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dev`                 | string | Developer identity. It is the namespace label `herdr.dev/owner` and the prefix the CLI force-adds to every pen name (`<dev>-<env>`). The namespace itself is named `<namespacePrefix><dev>`. |
+| `namespacePrefix`     | string | Prefix of the namespace name, default `env-` (namespace `env-tobias` for dev `tobias`). The composed name must be RFC 1123 and 63 characters or fewer.                                       |
+| `authorizedKeys`      | list   | ssh public keys, written to the `authorized_keys` Secret key of `herdr-dev-<namespace>`.                                                                                                     |
+| `operator.namespace`  | string | Namespace of the cluster-wide operator that the chart grants per-namespace write access to (default `pipen`).                                                                                |
+| `tailscale.namespace` | string | Namespace where the tailscale-operator L3 ssh proxy runs. The ingress policy allows it to reach env pods on port 22 (default `tailscale`).                                                   |
+| `egress.cidrAllows`   | list   | Fixed CIDR ranges a dev pod may reach, as strings. For example `100.64.0.0/10`, the tailscale CGNAT.                                                                                         |
+| `egress.podAllows`    | list   | In-cluster targets a dev pod may reach. Each entry is `namespace`, `podSelector` (a label map), and `port`. Omit `port` to allow all ports. For example the litellm proxy.                   |
 
 ## Objects
 
-- `Namespace` `<dev>` (label `herdr.dev/owner=<dev>`)
+- `Namespace` `<namespacePrefix><dev>` (label `herdr.dev/owner=<dev>`)
 - `ServiceAccount` `deploy`
 - `Role`/`RoleBinding` `deploy`: CRUD on `pens.pipen.dev/pens`, `get` on
   `pens/status`, `get` on `pods`, `get` on `pods/log` (no pod, Service or PVC
@@ -42,7 +43,7 @@ Or from a repo checkout: `helm install <dev> charts/dev-namespace ...`.
   them)
 - `Secret` `deploy-token` (`kubernetes.io/service-account-token`); the token
   controller fills `data.token` after a delay
-- `Secret` `herdr-dev-<dev>`: the ssh public keys
+- `Secret` `herdr-dev-<namespace>`: the ssh public keys
 - `NetworkPolicy` `default-deny-egress`: denies all egress. It then allows
   the public internet (`0.0.0.0/0` minus the private, CGNAT, loopback and
   link-local ranges), DNS to kube-dns (port 53 tcp+udp), and the egress
@@ -60,6 +61,47 @@ Before 0.3.0 the dev token managed raw pod, Service, configmap and secret
 objects directly. Since 0.3.0 it manages Pens only: the dev token creates and
 deletes Pens and reads their status. The operator, on its own
 ServiceAccount, creates the pod, Service and PVC for each Pen.
+
+## 0.5.0 adds the namespace prefix
+
+`namespacePrefix` (default `env-`) goes in front of the namespace name.
+For dev `tobias` the Namespace is `env-tobias`, and all namespaced
+objects live in it. `dev` keeps meaning the developer identity: the
+namespace label `herdr.dev/owner` holds the bare `dev`, and it is
+the prefix the CLI force-adds to every pen name (`<dev>-<env>`).
+
+The naming convention the chart, the operator, and the bootstrap share:
+
+- The Namespace is `<namespacePrefix><dev>`.
+- The ssh-key Secret (this chart) and the dev ConfigMap (your cluster
+  tooling) are both named `herdr-dev-<namespace>`. The operator waits
+  for `herdr-dev-<pen namespace>` before it creates a pen, so both
+  objects use the composed namespace name, not the bare `dev`.
+- The pod env `DEV_USER` is the namespace name (the convention from
+  0.3.0), so the unix user in each env is `env-tobias`, not `tobias`.
+
+The render fails when the composed name is not RFC 1123 or is longer
+than 63 characters.
+
+### Cutover for an existing dev
+
+A Helm upgrade cannot rename a namespace. The cutover is per dev: create
+the prefixed namespace and keep the home PVCs in it.
+
+1. Note each pen's home PVC in the old namespace (name, size, volume
+   name).
+2. Install the chart for the same dev under a new release name, for
+   example `env-<dev>`. The old release `<dev>` still exists, and a
+   Helm release name cannot be re-used. The default prefix gives the
+   new namespace `env-<dev>`.
+3. Recreate each home PVC in the new namespace with the same name and
+   the same volume name. The new PVC binds the kept volume, and the
+   home data stays.
+4. Give the developer the new CLI config (`namespace` is the new
+   namespace, `dev_user` is the bare dev) and recreate the pens.
+5. When the new pens work and nothing points at the old namespace,
+   run `helm uninstall <dev>`. That removes the old namespace and the
+   old home PVCs.
 
 ## 0.4.0 locks the namespace down
 

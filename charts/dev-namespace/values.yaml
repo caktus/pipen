@@ -1,11 +1,18 @@
-# Developer name: this IS the namespace name. Must be RFC 1123
-# (lowercase alphanumerics and '-'); a developer the admins have granted
-# an environment for.
+# Developer name: the developer identity the admins have granted an
+# environment for. It is the namespace label herdr.dev/owner and the
+# prefix the CLI force-adds to every pen name (<dev>-<env>).
+# The namespace itself is named <namespacePrefix><dev>.
 dev: ""
 
+# Prefix for the developer namespace name: the Namespace and all its
+# objects are named <namespacePrefix><dev> (default env-tobias for dev
+# tobias). The composed name must be RFC 1123 (lowercase alphanumerics
+# and '-') and at most 63 characters. The render fails when it is not.
+namespacePrefix: env-
+
 # OpenSSH public keys authorized on each env's key-only sshd. Rendered into
-# Secret herdr-dev-<dev> (key authorized_keys), which the herdr CLI's pod
-# template projects into every env.
+# Secret herdr-dev-<namespace> (key authorized_keys), which the herdr CLI's
+# pod template projects into every env.
 authorizedKeys: []
 
 # Where the cluster-wide pipen-operator lives (pipen-operator chart). Its

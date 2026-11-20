@@ -243,7 +243,7 @@ Install the chart from the chart repository:
 ```sh
 helm repo add pipen https://caktus.github.io/pipen
 helm repo update pipen
-helm install <dev> pipen/dev-namespace --version 0.3.0 \
+helm install <dev> pipen/dev-namespace --version 0.5.0 \
   --set dev=<dev> \
   --set 'authorizedKeys[0]=<ssh public key 1>' \
   --set 'authorizedKeys[1]=<ssh public key 2>'
@@ -258,7 +258,7 @@ helm install <dev> charts/dev-namespace \
   --set 'authorizedKeys[1]=<ssh public key 2>'
 ```
 
-This creates, in namespace `<dev>` (label `herdr.dev/owner`):
+This creates, in namespace `<namespacePrefix><dev>` (default `env-<dev>`; the label `herdr.dev/owner` holds the bare `dev`):
 
 - ServiceAccount `deploy` and a namespace-scoped Role/RoleBinding. The role
   covers the pens CRD (`pens`, `pens/status`), `get` on `pods`, and `get`
@@ -269,7 +269,7 @@ This creates, in namespace `<dev>` (label `herdr.dev/owner`):
   admin-only data wipe stays with the admin. Nothing is cluster-wide, and
   nothing reaches other namespaces
 - The explicit ServiceAccount token Secret `deploy-token`
-- The Secret `herdr-dev-<dev>` (the ssh keys)
+- The Secret `herdr-dev-<namespace>` (the ssh keys. Under the default prefix that is `herdr-dev-env-<dev>`)
 
 The dev chart grants the operator ServiceAccount (namespace `pipen`) the
 per-namespace writes. Install the operator first (step 2); until it exists
@@ -281,7 +281,7 @@ sure that it is filled before you read it.
 
 ### 4. Create the dev ConfigMap
 
-The ConfigMap `herdr-dev-<dev>` (namespace `<dev>`) holds the runtime
+The ConfigMap `herdr-dev-<namespace>` (namespace `env-<dev>` under the default prefix) holds the runtime
 configuration that the operator projects into each pen:
 
 - The rendered pi configuration: `models.json` (litellm baseUrl rewritten to
@@ -296,13 +296,13 @@ deployment repo).
 Read the token and write `.herdr-<dev>.yaml` (0600, never committed):
 
 ```sh
-kubectl -n <dev> get secret deploy-token -o jsonpath='{.data.token}' | base64 -d
+kubectl -n env-<dev> get secret deploy-token -o jsonpath='{.data.token}' | base64 -d
 ```
 
 ```yaml
 api_base: https://<cluster-api-host>:<port> # e.g. the tailnet API address
-namespace: <dev>
-dev_user: <dev>
+namespace: env-<dev> # the composed name, namespacePrefix + dev
+dev_user: <dev> # the bare dev
 token: <sa-token>
 ```
 
@@ -313,12 +313,12 @@ token: <sa-token>
    secrets)
 3. Delete `.herdr-<dev>.yaml`
 4. The home PVCs (and their data) go with the namespace when you delete it.
-   Run `kubectl delete ns <dev>`. This deletes the home data
+   Run `kubectl delete ns env-<dev>`. This deletes the home data
 
 ### Wipe the home data for one pen
 
 ```sh
-kubectl -n <dev> delete pvc <pen>-home     # frees the mirrored volume
+kubectl -n env-<dev> delete pvc <pen>-home     # frees the mirrored volume
 ```
 
 ## Capacity

@@ -2,13 +2,13 @@
 id: PI-011
 github_issue: 11
 github_url: https://github.com/caktus/pipen/issues/11
-last_synced: '2026-11-20T22:17:31.107683+00:00'
+last_synced: '2026-11-20T22:53:48.106875+00:00'
 synced_hash: 78023a49cbb0f5708b5518bf99873854061a98a90caea85a3584c50015376f59
 title: Make dev namespace prefix configurable
 type: Feature
 assignee: '@me'
 labels:
-- phase/draft
+- phase/done
 context:
   relates_to: []
 ---
