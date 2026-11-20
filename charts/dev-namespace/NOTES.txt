@@ -1,7 +1,7 @@
 Provisioned namespace {{ .Values.dev }} for the herdr dev environments:
 
   - ServiceAccount deploy + ns-scoped Role/RoleBinding (since 0.3.0 the dev
-    token manages Pens only (pod, Service and PVC creation is the operator's)
+    token manages Pens only: pod, Service and PVC creation is the operator's)
   - Secret deploy-token (explicit SA token; the token controller populates
     data.token asynchronously — poll for it before reading)
   - Secret herdr-dev-{{ .Values.dev }} (authorized_keys for the env sshd)
