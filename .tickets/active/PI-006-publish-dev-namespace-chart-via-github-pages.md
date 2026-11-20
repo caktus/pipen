@@ -1,14 +1,14 @@
 ---
-id: PI-005
-github_issue: null
-github_url: null
-last_synced: null
-synced_hash: null
+id: PI-006
+github_issue: 6
+github_url: https://github.com/caktus/pipen/issues/6
+last_synced: '2026-11-20T17:02:00.593319+00:00'
+synced_hash: 67da2797c2ecddee049a74e4dd36b315cd993b218e7d02a8a4be347c785d3c0f
 title: Publish dev-namespace chart via GitHub Pages
 type: Feature
 assignee: '@me'
 labels:
-- phase/draft
+- phase/plan-ready
 context:
   relates_to: []
 ---
