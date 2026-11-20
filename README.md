@@ -239,7 +239,7 @@ This creates, in namespace `<dev>` (label `herdr.dev/owner`):
 - ServiceAccount `deploy` and a namespace-scoped Role/RoleBinding. The role
   covers the pens CRD (`pens`, `pens/status`), `get` on `pods`, and `get`
   on `pods/log`. Nothing else. In particular it holds **no** pod, Service
-  or pvc create — the operator's own ServiceAccount does those, via the
+  or pvc create. The operator's own ServiceAccount does those, via the
   separate `pipen-operator` Role the same chart creates (pods, services,
   pvc create, configmap/secret read, and still **no pvc delete**). The
   admin-only data wipe stays with the admin. Nothing is cluster-wide, and

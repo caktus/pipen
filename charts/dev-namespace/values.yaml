@@ -1,4 +1,4 @@
-# Developer name — this IS the namespace name. Must be RFC 1123
+# Developer name: this IS the namespace name. Must be RFC 1123
 # (lowercase alphanumerics and '-'); a developer the admins have granted
 # an environment for.
 dev: ""

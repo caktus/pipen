@@ -17,10 +17,11 @@ Or from a repo checkout: `helm install <dev> charts/dev-namespace ...`.
 
 ## Values
 
-| Name             | Type   | Description                                                                        |
-| ---------------- | ------ | ---------------------------------------------------------------------------------- |
-| `dev`            | string | Developer name. Becomes the namespace name. RFC 1123.                              |
-| `authorizedKeys` | list   | ssh public keys, written to the `authorized_keys` Secret key of `herdr-dev-<dev>`. |
+| Name                 | Type   | Description                                                                                                   |
+| -------------------- | ------ | ------------------------------------------------------------------------------------------------------------- |
+| `dev`                | string | Developer name. Becomes the namespace name. RFC 1123.                                                         |
+| `authorizedKeys`     | list   | ssh public keys, written to the `authorized_keys` Secret key of `herdr-dev-<dev>`.                            |
+| `operator.namespace` | string | Namespace of the cluster-wide operator that the chart grants per-namespace write access to (default `pipen`). |
 
 ## Objects
 
