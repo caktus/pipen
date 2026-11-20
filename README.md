@@ -145,8 +145,9 @@ chart-releaser on every merge to main. It creates a release for each new
 chart version and pushes the package and `index.yaml` to the `gh-pages`
 branch, which GitHub Pages serves. The release trigger is a `version`
 bump in `charts/dev-namespace/Chart.yaml`. A chart change without a bump
-publishes nothing and fails `verify.yml`. One-time setup: set the Pages
-source to the `gh-pages` branch in the repo settings.
+publishes nothing and fails `verify.yml`. The site root also carries a
+human-readable index of the published charts. One-time setup: set the
+Pages source to the `gh-pages` branch in the repo settings.
 
 ### 2. Bootstrap a developer
 
