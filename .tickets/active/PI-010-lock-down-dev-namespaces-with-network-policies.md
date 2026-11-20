@@ -1,14 +1,14 @@
 ---
-id: PI-007
-github_issue: null
-github_url: null
-last_synced: null
-synced_hash: null
+id: PI-010
+github_issue: 10
+github_url: https://github.com/caktus/pipen/issues/10
+last_synced: "2026-11-20T18:34:08.147383+00:00"
+synced_hash: 68888f60e27ca9560c29cb97ee2e777a5358ce44a2266238958a7fe625c74ec9
 title: Lock down dev namespaces with network policies
 type: Feature
-assignee: '@me'
+assignee: "@me"
 labels:
-- phase/draft
+  - phase/plan-ready
 context:
   relates_to: []
 ---
@@ -29,6 +29,7 @@ The dev-namespace chart creates no NetworkPolicies today, and env pods run as pr
 - [ ] A dev env still boots and works under the policies: image pull, home PVC mount, and litellm access (verified on the hosted-llm cluster)
 
 <!-- tickets:research -->
+
 ## Standard NetworkPolicy mechanics (k8s.io/v1)
 
 - Egress is allow-only: there are no deny rules. "Allow public, block
@@ -36,7 +37,7 @@ The dev-namespace chart creates no NetworkPolicies today, and env pods run as pr
   for the public space (kubernetes.io/docs/concepts/services-networking/
   network-policies).
 - `ipBlock.except` is a standard field: `to: ipBlock: {cidr: 0.0.0.0/0,
-  except: [...]}` is the canonical "internet only" recipe (stackoverflow
+except: [...]}` is the canonical "internet only" recipe (stackoverflow
   57789969). Validation requires every `except` entry to be a subnet of the
   `cidr` and entries not to overlap (kubernetes/kubernetes PR #86578).
 - One `NetworkPolicyPeer` allows exactly one of `podSelector`,
@@ -49,7 +50,7 @@ The dev-namespace chart creates no NetworkPolicies today, and env pods run as pr
 
 - Public egress: single ipBlock `0.0.0.0/0` with
   `except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10,
-  127.0.0.0/8, 169.254.0.0/16]`. (The widely-copied SO example uses
+127.0.0.0/8, 169.254.0.0/16]`. (The widely-copied SO example uses
   172.16.0.0/20, which is wrong; RFC1918 is 172.16.0.0/12.)
 - DNS: the kube-dns ClusterIP sits in the (private) service CIDR, so it is
   blocked by default and must be allowed explicitly: port 53 UDP+TCP to
@@ -74,7 +75,7 @@ The dev-namespace chart creates no NetworkPolicies today, and env pods run as pr
   the proxy is owner-referenced to the Service; both are consistent
   (cross-namespace ownerRef). Verify placement on the hosted-llm cluster.
 - Proxy pod labels (sts.go): `tailscale.com/parent-resource-type:
-  ingress_service`, `tailscale.com/parent-resource: <service>`,
+ingress_service`, `tailscale.com/parent-resource: <service>`,
   `tailscale.com/parent-resource-ns: <ns>`, `app: <service UID>`. The dev
   namespace chart cannot know per-pen service names at install time, so the
   ingress allow is per-namespace: from the tailscale operator namespace

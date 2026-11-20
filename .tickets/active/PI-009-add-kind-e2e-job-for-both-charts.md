@@ -2,16 +2,16 @@
 id: PI-009
 github_issue: 9
 github_url: https://github.com/caktus/pipen/issues/9
-last_synced: '2026-11-20T18:33:25.765909+00:00'
+last_synced: "2026-11-20T18:33:25.765909+00:00"
 synced_hash: 0bd19a7a14185d908137e1ace63c9b82e8fddca212a18a00908a4ac7b027ea85
 title: Add kind e2e job for both charts
 type: Task
-assignee: '@me'
+assignee: "@me"
 labels:
-- phase/draft
+  - phase/draft
 context:
   relates_to:
-  - PI-004
+    - PI-004
 ---
 
 As a maintainer, I want CI to install both charts into a kind cluster and drive a pen through its lifecycle, so that RBAC and operator wiring regressions are caught before merge.
