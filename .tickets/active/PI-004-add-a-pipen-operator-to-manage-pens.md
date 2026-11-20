@@ -96,6 +96,63 @@ Today the CLI renders pod/Service templates and creates four objects itself (PVC
   — the reconcile loop reads exactly that, which is also where the CLI's `status.hostname`
   comes from.
 
+### Live cluster test feedback (2026-11-20)
+
+Source: live cluster test of the published dev-namespace chart (0.2.0),
+the pipen CLI, and this branch (fresh per-dev namespace, pen up/adopt,
+no in-cluster registry, GHCR pulls). The operator flow works end to end
+and the CLI UX is good. Findings, roughly by severity:
+
+1. **Helm 4 does not install `crds/`.** The operator chart relies on
+   Helm's `crds/` auto-install. Helm 4 (tested: 4.3.2) ignores `crds/`
+   at all, so on a Helm 4 cluster the CRD silently never exists: the
+   operator pod starts, acquires its leader lease, looks healthy — and
+   every CLI call 404s. The README's "applied at install only"
+   describes Helm 3 behavior.
+2. **The operator image is a required chart value but nothing
+   publishes it.** `image: ""` is required; the branch CI verifies the
+   build, but the publish workflow only covers the dev image. A
+   first-time installer must build the operator and stage it on
+   schedulable node(s) by hand.
+3. **Version downgrade on merge.** The branch's dev-namespace chart is
+   0.1.0 while the published one is 0.2.0. Merging and republishing
+   would be a version _downgrade_ with a different Role (pens verbs
+   replace the pod/Service verbs).
+4. **Pens Role migration wrinkle.** A dev namespace upgraded to the
+   pens Role can no longer manage pre-existing raw pod/Service envs
+   (the dev token loses pod create/delete), and the new CLI has no Pen
+   for them — `kubectl delete pod` is the only teardown. (Decision
+   2026-11-20: there are no live namespaces to upgrade, so no upgrade
+   note is needed; document only the 0.3.0 break.)
+
+Working well (keep doing): PVC adoption on pen create (a leftover
+`<env>-home` from a partial run is reused, not re-provisioned); the Pen
+CR status (phase + message + hostname) is exactly the right surface
+for the CLI poll loop; `down` preserving the PVC and printing the
+admin wipe command; the deploy-token design (Helm never manages the
+controller-populated `data.token`; deleting the Secret rotates) across
+idempotent re-runs; the specific, actionable CLI error messages.
+
+### Repo state the fixes must land on (recon, 2026-11-20)
+
+- `main` is 12 commits ahead of the branch. It holds the published
+  dev-namespace 0.2.0, `.github/workflows/publish-chart.yml`
+  (chart-releaser to the gh-pages branch; `charts_dir: charts`, so it
+  publishes _any_ chart under `charts/`), `scripts/chart_index.py`,
+  `charts/dev-namespace/README.md`, and a verify.yml check that
+  requires a `dev-namespace/Chart.yaml` version bump with any
+  `charts/` change (dev-namespace only).
+- Consequences: the 0.3.0 bump must land on top of a merge of
+  `main`, and the bump check must generalize to every changed chart.
+- Local machine has helm 4.3.2 (the bug-report version) for
+  verification; go and docker available.
+- For the operator CRD check unit test: `k8s.io/client-go v0.33.0`
+  `discovery/fake.FakeDiscovery` gets `Resources` promoted from its
+  embedded `*testing.Fake`, so construct it as
+  `&discoveryfake.FakeDiscovery{Fake: &clientgotesting.Fake{Resources:
+[]*metav1.APIResourceList{{GroupVersion: "pens.pipen.dev/v1alpha1"}}}}`;
+  `ServerGroups()` derives the group list from `Resources`.
+
 <!-- tickets:approaches -->
 
 ## Approaches
@@ -125,6 +182,63 @@ Chosen (operator, 2026-11-20): **one cluster-wide operator + per-namespace RBAC*
 - Accepted trade-off: one operator down blocks _all_ devs (per-ns operators would
   isolate the failure). Fine for a team dev tool; leader election is on so a future
   2-replica HA flip is cheap.
+
+### PR feedback fixes (2026-11-20)
+
+**CRD install (feedback 1) — chosen: move the CRD into
+`templates/`.** Helm 3 and 4 both install it as a normal release
+resource. v1alpha1 is frozen, so the rendered bytes never change and
+`helm upgrade` is a no-op diff. The operator also discovery-checks the
+`pens.pipen.dev` API group at startup and exits with a self-explanatory
+error when it is missing (defense in depth: the failure names itself
+instead of surfacing as an opaque informer error).
+
+- Rejected: keep `crds/` + documented kubectl step. The Helm 4 break
+  stays the default for every installer.
+- Rejected: readiness gate only. The pod goes unhealthy but the cause
+  stays opaque, and the fix is still manual.
+- Accepted cost: removing the CRD from the chart would make Helm delete
+  the CRD (data loss) — noted in NOTES.txt. Schema changes need
+  kubectl while v1alpha1 is frozen.
+
+**Operator image (feedback 2) — chosen: publish to GHCR like the dev
+image (user decision).** A `publish-operator` workflow mirrors
+`publish.yml` (push to main, nightly 04:00, manual dispatch; no cache;
+digest compare against `:latest`; push only on change; keep the 14
+newest date tags). Tags: `YYYYMMDD` + `:latest` (no pi-version
+component; the operator carries none). The chart's `image:` defaults to
+`ghcr.io/caktus/pipen-operator:latest`; the `requireImage` failure goes
+away. A new `nodeSelector` values passthrough pins the Deployment to
+node(s) that hold a locally staged image. The README keeps a short
+"building the operator image yourself" fallback (build + `--set
+image`, `nodeSelector` for staging).
+
+- Rejected: build + staging recipe only. It keeps the one-node
+  staging problem for every cluster.
+- One-time setup: set the package `caktus/pipen-operator` visibility to
+  public (anonymous pull), same as the dev image.
+
+**Chart versioning (feedback 3) — chosen: merge main, bump
+dev-namespace to 0.3.0.** The published 0.2.0 keeps the old Role;
+0.3.0 is the pens Role. The break (dev tokens manage Pens only; pod,
+Service and PVC creation move to the operator ServiceAccount) is
+documented in the chart README and NOTES.txt. `pipen-operator`
+publishes for the first time at 0.1.0.
+
+**Chart publishing — chosen: publish both charts to the Pages repo
+(user decision).** `publish-chart.yml` already uses `charts_dir:
+charts`, so `pipen/pipen-operator` ships for free. The chart is
+cluster-generic and carries no secrets (storage class, node selector
+are overridable values).
+
+**Migration note (feedback 4) — dropped (user decision).** No live
+namespaces to upgrade; the 0.3.0 break is documented, no upgrade
+runbook.
+
+**CI — add:** `helm lint` + `helm template` for `pipen-operator` in
+verify.yml (9 manifests, assert the CRD kind is present); generalize
+the bump check so every changed chart requires a `version:` bump in its
+own Chart.yaml.
 
 <!-- tickets:plan -->
 
@@ -172,12 +286,21 @@ node).
 
 ### RBAC
 
-- Operator: ClusterRole `pens get/list/watch` (read-only, custom kind only) +
-  per-ns Role in each dev namespace (created by dev-namespace): pods
-  (create/get/list/watch/patch/update/delete), services (same minus patch),
-  persistentvolumeclaims (create/get/list/watch — **no delete**), configmaps (get),
-  secrets (get). Plus a Role in the operator namespace (leases, events) for leader
-  election.
+- Operator: ClusterRole `pens get/list/watch` + `namespaces get` (read-only,
+  for the provisioned-namespace check; cluster-scoped reads are the only
+  cluster grants — the plan's original list omitted `pens/status update`
+  and `namespaces get`, which the final review found; a Pen in an
+  un-provisioned namespace gets no status write, by design: the reconcile
+  errors with backoff and only a cluster-admin can create such Pens). Per-ns
+  Role in each dev namespace (created by dev-namespace): `pens/status`
+  (update), pods (create/get/list/watch/patch/update/delete), services
+  (same minus patch), persistentvolumeclaims (create/get/list/watch — **no
+  delete**), configmaps (get), secrets (get). Plus a Role in the operator
+  namespace (leases, events, configmaps get/list/watch for the
+  namespace-scoped config informer). All non-Pen reads in the reconciler go
+  through the API reader (direct reads); the manager cache holds only Pens
+  plus the operator's own ConfigMap (scoped to the operator namespace),
+  which is what makes the per-ns grants sufficient.
 - Dev (`deploy` Role, shrunk): pens (pipen.dev) get/list/watch/create/update/delete,
   pens/status get, pods get, pods/log get.
 
@@ -249,3 +372,88 @@ Blast radius: operator ns `pipen` (admin, deletable), scratch dev namespaces
 Pen updates/rollouts (image change propagation), home wipe via the API, per-namespace
 config overrides, operator metrics, HA beyond leader election, CRD versioning past
 v1alpha1.
+
+### PR feedback implementation plan (2026-11-20)
+
+One commit per task (Conventional Commits, Simple English), `pre-commit
+run --all-files` before each commit. Local helm is 4.3.2; use it for
+all chart verification (the bug-report version).
+
+**1. Merge main.** `git fetch origin && git merge origin/main`.
+Conflicts: `charts/dev-namespace/role.yaml` → the branch's pens Role
+wins (pens CRUD, pens/status get, pods get, pods/log get).
+`Chart.yaml` → main's 0.2.0. README/NOTES/verify.yml → main's, with
+the branch's operator-flow text folded back where both sides added
+content. Verify: both charts lint, dev-namespace renders 8 kinds,
+`go test ./...` in `operator/`, pre-commit green. Commit: `chore: merge
+main into the operator branch`.
+
+**2. CRD into templates + loud startup check.**
+
+- `git mv charts/pipen-operator/crds/pens.pipen.dev.yaml charts/pipen-operator/templates/crd.yaml`.
+- `operator/hack/generate.sh`: controller-gen output dir
+  `../charts/pipen-operator/templates`, rename target `crd.yaml` (keep
+  the prettier step pointed at the new path).
+- `operator/main.go`: new
+  `crdGroupAvailable(ctx context.Context, d discovery.DiscoveryInterface) (bool, error)`
+  — `ServerGroups`, match `v1alpha1.GroupVersion.Group`. In `main()`,
+  before the manager starts: discovery client from
+  `ctrl.GetConfigOrDie()`, and when the group is missing print a loud
+  error (name the chart and `templates/crd.yaml`) and exit 1. TDD:
+  `operator/main_test.go` with two tests (group present → true, absent
+  → false) built with `discoveryfake.FakeDiscovery` (see recon note on
+  the `Resources` field).
+- Verify: `helm template` renders 9 kinds including
+  `CustomResourceDefinition`; `helm template --show-only
+templates/crd.yaml` is byte-identical to the old `crds/` file
+  (frozen-schema guarantee).
+- NOTES.txt + README: the CRD is a release-managed resource, installed
+  on Helm 3 and 4 alike; upgrades are no-ops while v1alpha1 is frozen;
+  removing the CRD from the chart would make Helm delete it.
+- Commit: `fix: install the Pen CRD from templates for Helm 3 and 4`.
+
+**3. Operator image publish + chart defaults.**
+
+- `.github/workflows/publish-operator.yml` mirrors `publish.yml`:
+  `IMAGE: ghcr.io/caktus/pipen-operator`, `docker buildx build
+--no-cache --load -t pipen-operator:candidate operator/`, tag
+  `$(date -u +%Y%m%d)` (no pi-version extraction), digest compare,
+  push date tag + `:latest`, crane prune of `^[0-9]{8}$` tags keeping
+  the 14 newest.
+- values: `image: "ghcr.io/caktus/pipen-operator:latest"`, new
+  `nodeSelector: {}`. Deployment: drop the `requireImage` include and
+  helper; `imagePullPolicy` is `Always` for a `:latest` reference,
+  `IfNotPresent` otherwise; render `nodeSelector` under `with`.
+- Verify: default render (no `--set image`) shows the default image,
+  `Always`, no nodeSelector; `--set image=local/op:v1 --set
+nodeSelector.kubernetes.io/hostname=node1` shows the pinned image,
+  `IfNotPresent`, and the rendered nodeSelector.
+- README Admins step 2: published image default, one-time GHCR
+  public-visibility setup line, short self-build subsection.
+- Commits: `ci: publish the operator image to GHCR on main merges`,
+  then `feat: default the operator chart to the published image`.
+
+**4. dev-namespace 0.3.0.** Bump `Chart.yaml` to 0.3.0 (appVersion
+stays 0.1.0). Chart README Objects section → the pens Role and the
+`pipen-operator` Role; a short "0.3.0 changed the role" section (no
+upgrade runbook). One line in NOTES.txt. Verify: lint + 8 kinds.
+Commit: `feat: bump dev-namespace to 0.3.0 for the pens role`.
+
+**5. verify.yml.** Replace the dev-only bump check with a per-chart
+loop: every chart directory touched by the PR diff must carry a
+`^[+-]version:` change in its own Chart.yaml. Add `helm lint
+charts/pipen-operator` + a template/parse step (9 manifests, assert
+`CustomResourceDefinition` among the kinds). Verify the loop body with
+a synthetic git repo dry run (no-bump change fails, bumped change
+passes). Commit: `ci: bump-check every changed chart and render the
+operator chart`.
+
+- Post-merge manual verification (no commit): releases
+  `dev-namespace-0.3.0` and `pipen-operator-0.1.0` exist; the gh-pages
+  `index.yaml` lists both; a merge with no bump publishes nothing;
+  set the GHCR package `caktus/pipen-operator` visibility to public.
+
+**6. README.** Chart-repo section: both charts published
+(`pipen/dev-namespace`, `pipen/pipen-operator`). Admins step 2 leads
+with the repo install, checkout path as fallback. Commit: `docs:
+document both published charts in the README`.

@@ -1,0 +1,19 @@
+# Grants the pipen-operator chart's ServiceAccount (namespace pipen) the
+# per-namespace writes above. A RoleBinding may bind a ServiceAccount from
+# another namespace (subject namespace field). Until the operator is
+# installed this binding dangles harmlessly.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pipen-operator
+  namespace: {{ .Values.dev | quote }}
+  labels:
+    {{- include "dev-namespace.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pipen-operator
+subjects:
+  - kind: ServiceAccount
+    name: pipen-operator
+    namespace: {{ .Values.operator.namespace | quote }}

@@ -1,0 +1,8 @@
+# Fixed namespace: the dev-namespace chart references the operator
+# ServiceAccount by name+namespace, so this is not overridable.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pipen
+  labels:
+    app.kubernetes.io/name: pipen-operator

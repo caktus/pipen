@@ -228,3 +228,6 @@ __marimo__/
 
 # git worktrees (isolated feature workspaces)
 .worktrees/
+
+# superpowers sdd scratch (ledgers, briefs, review packages)
+.superpowers/

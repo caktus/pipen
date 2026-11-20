@@ -30,6 +30,24 @@ repos:
     hooks:
       - id: gitleaks
 
+  # Go (operator/): format + vet. Local hooks — go lives on the machine
+  # (or CI), so no hook repo to pin.
+  - repo: local
+    hooks:
+      - id: gofmt
+        name: gofmt (operator)
+        entry: gofmt -l -w
+        language: system
+        files: ^operator/.*\.go$
+        pass_filenames: true
+      - id: go-vet
+        name: go vet (operator)
+        entry: bash -c 'cd operator && go vet ./...'
+        language: system
+        files: ^operator/
+        pass_filenames: false
+        require_serial: true
+
   - repo: https://github.com/shellcheck-py/shellcheck-py
     rev: v0.11.0.1
     hooks:
