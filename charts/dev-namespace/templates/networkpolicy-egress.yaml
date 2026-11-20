@@ -1,0 +1,69 @@
+# Default-deny egress for every pod in this dev namespace, plus the egress
+# that stays allowed:
+#   - the public internet (0.0.0.0/0 minus the private, CGNAT, loopback and
+#     link-local ranges)
+#   - DNS to kube-dns (port 53 tcp+udp) in kube-system
+#   - any in-cluster allow set via .Values.egress (see the chart README)
+# Without a default-deny rule a NetworkPolicy cannot block egress, so this
+# empty rule and the allow rules live in the same policy and are ORed.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-egress
+  namespace: {{ .Values.dev | quote }}
+  labels:
+    {{- include "dev-namespace.labels" . | nindent 4 }}
+spec:
+  # match every pod in this namespace
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # deny all egress by default; the rules below are the only exceptions
+    - {}
+    # public internet, minus the private and reserved ranges
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+    # DNS to kube-dns. kube-system carries the auto namespace label
+    # kubernetes.io/metadata.name=kube-system (GA in kubernetes 1.31).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: TCP
+          port: 53
+        - protocol: UDP
+          port: 53
+    {{- range .Values.egress.cidrAllows }}
+    # a fixed CIDR range (for example 100.64.0.0/10, the tailscale CGNAT)
+    - to:
+        - ipBlock:
+            cidr: {{ . | quote }}
+    {{- end }}
+    {{- range .Values.egress.podAllows }}
+    # a target namespace and pod on the given port; all ports when port
+    # is omitted (for example the litellm proxy)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .namespace | quote }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .podSelector | nindent 16 }}
+      {{- if .port }}
+      ports:
+        - port: {{ .port }}
+      {{- end }}
+    {{- end }}

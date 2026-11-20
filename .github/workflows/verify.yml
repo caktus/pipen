@@ -71,7 +71,7 @@ jobs:
             | python3 -c '
           import sys, yaml
           docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
-          assert len(docs) == 8, f"expected 8 manifests, got {len(docs)}"
+          assert len(docs) == 10, f"expected 10 manifests, got {len(docs)}"
           print(f"{len(docs)} manifests OK: " + ", ".join(d["kind"] for d in docs))
           '
       - name: Missing dev must fail the render

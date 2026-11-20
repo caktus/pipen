@@ -12,3 +12,26 @@ authorizedKeys: []
 # ServiceAccount gets a per-namespace write Role in this namespace.
 operator:
   namespace: pipen
+
+# Where the tailscale-operator L3 ssh proxy StatefulSet runs. The ingress
+# NetworkPolicy allows that namespace to reach env pods on port 22. The
+# operator default is the namespace named `tailscale`.
+tailscale:
+  namespace: tailscale
+
+# Extra egress this dev namespace may use, beyond the public internet and
+# DNS that are always allowed. Without these, a dev pod reaches no other
+# namespace and no cluster service.
+egress:
+  # Fixed CIDR ranges, as strings. Each becomes one egress allow to that
+  # range (for example "100.64.0.0/10", the tailscale CGNAT).
+  cidrAllows: []
+  # Targets by namespace, pod selector and port. Each entry needs namespace
+  # and podSelector (a label map); port is optional (omit it to allow all
+  # ports to those pods). For example the litellm proxy pod in a litellm
+  # namespace:
+  #   - namespace: litellm
+  #     podSelector:
+  #       app: litellm
+  #     port: 4000
+  podAllows: []

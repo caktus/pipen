@@ -1,0 +1,32 @@
+# Default-deny ingress for every pod in this dev namespace, with one
+# exception: the tailscale-operator L3 proxy. The proxy is a single-replica
+# StatefulSet that lives in the tailscale operator namespace, not here, and
+# it is the only in-cluster source that may reach an env pod. It is matched
+# by the operator namespace and the proxy pod label
+# tailscale.com/parent-resource-type=ingress_service, on port 22.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: {{ .Values.dev | quote }}
+  labels:
+    {{- include "dev-namespace.labels" . | nindent 4 }}
+spec:
+  # match every pod in this namespace
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    # deny all ingress by default; the rule below is the only exception
+    - {}
+    # tailscale ssh proxy, from the operator namespace
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.tailscale.namespace | quote }}
+          podSelector:
+            matchLabels:
+              tailscale.com/parent-resource-type: ingress_service
+      ports:
+        - protocol: TCP
+          port: 22
