@@ -33,14 +33,27 @@ const (
 
 	requeueCreating = 10 * time.Second
 	requeuePending  = 30 * time.Second
+	// requeueReady keeps a Ready pen periodically reconciled: status stays
+	// truthful (hostname changes, node moves) and a deleted pod/Service is
+	// recreated by the next pass (create-or-leave still applies).
+	requeueReady = 30 * time.Second
 )
 
 // Reconciler reconciles Pens using the operator's config.
 type Reconciler struct {
+	// Client is the manager's cached client. It is used for the Pen itself
+	// and for status writes only — every other read goes through Reader,
+	// because a cached read opens a cluster-wide informer, which the
+	// operator's RBAC (deliberately no cluster-wide list/watch beyond
+	// Pens) cannot serve.
 	Client client.Client
+	// Reader is a direct API reader (the manager's APIReader) for
+	// everything that is not the Pen: namespace, herdr-dev CM/Secret,
+	// PVC, Service, Pod.
+	Reader client.Reader
 	Scheme *runtime.Scheme
-	// Config is the operator config for this reconcile pass; main swaps it
-	// when the ConfigMap changes (config is read once per pass).
+	// Config is the operator config for this reconcile pass; main reads it
+	// fresh (via the API reader) when the ConfigMap changes.
 	Config config.Config
 }
 
@@ -76,19 +89,35 @@ func (r *Reconciler) reconcilePen(ctx context.Context, pen *v1alpha1.Pen) (ctrl.
 	homeSize := orDefault(pen.Spec.HomeSize, cfg.HomeSize)
 	cpu := orDefault(pen.Spec.CPU, cfg.CPU)
 	memory := orDefault(pen.Spec.Memory, cfg.Memory)
+	homeQty, err := resource.ParseQuantity(homeSize)
+	if err != nil {
+		return r.fail(ctx, pen, fmt.Sprintf("invalid homeSize %q: %v", homeSize, err))
+	}
+	cpuQty, err := resource.ParseQuantity(cpu)
+	if err != nil {
+		return r.fail(ctx, pen, fmt.Sprintf("invalid cpu %q: %v", cpu, err))
+	}
+	memQty, err := resource.ParseQuantity(memory)
+	if err != nil {
+		return r.fail(ctx, pen, fmt.Sprintf("invalid memory %q: %v", memory, err))
+	}
 
-	if err := r.ensurePVC(ctx, pen, homeSize, cfg); err != nil {
+	if err := r.ensurePVC(ctx, pen, homeQty, cfg); err != nil {
 		return r.fail(ctx, pen, err.Error())
 	}
 	if err := r.ensureService(ctx, pen, cfg); err != nil {
 		return r.fail(ctx, pen, err.Error())
 	}
-	if err := r.ensurePod(ctx, pen, image, cpu, memory, cfg); err != nil {
+	res := corev1.ResourceList{
+		corev1.ResourceCPU:    cpuQty,
+		corev1.ResourceMemory: memQty,
+	}
+	if err := r.ensurePod(ctx, pen, image, res, cfg); err != nil {
 		return r.fail(ctx, pen, err.Error())
 	}
 
 	pod := &corev1.Pod{}
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: podName(pen.Name), Namespace: pen.Namespace}, pod); err != nil {
+	if err := r.Reader.Get(ctx, types.NamespacedName{Name: podName(pen.Name), Namespace: pen.Namespace}, pod); err != nil {
 		return r.fail(ctx, pen, fmt.Sprintf("cannot read pod: %v", err))
 	}
 	if !podReady(pod) {
@@ -106,7 +135,7 @@ func (r *Reconciler) reconcilePen(ctx context.Context, pen *v1alpha1.Pen) (ctrl.
 
 func (r *Reconciler) namespaceProvisioned(ctx context.Context, ns string) bool {
 	n := &corev1.Namespace{}
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: ns}, n); err != nil {
+	if err := r.Reader.Get(ctx, types.NamespacedName{Name: ns}, n); err != nil {
 		return false
 	}
 	_, ok := n.Labels[ownerLabelKey]
@@ -114,14 +143,14 @@ func (r *Reconciler) namespaceProvisioned(ctx context.Context, ns string) bool {
 }
 
 func (r *Reconciler) objectExists(ctx context.Context, key types.NamespacedName, obj client.Object) bool {
-	err := r.Client.Get(ctx, key, obj)
+	err := r.Reader.Get(ctx, key, obj)
 	return err == nil
 }
 
-func (r *Reconciler) ensurePVC(ctx context.Context, pen *v1alpha1.Pen, size string, cfg config.Config) error {
+func (r *Reconciler) ensurePVC(ctx context.Context, pen *v1alpha1.Pen, size resource.Quantity, cfg config.Config) error {
 	key := types.NamespacedName{Name: pen.Name + "-home", Namespace: pen.Namespace}
 	pvc := &corev1.PersistentVolumeClaim{}
-	if err := r.Client.Get(ctx, key, pvc); err == nil {
+	if err := r.Reader.Get(ctx, key, pvc); err == nil {
 		return nil // create-or-leave
 	} else if !apierrors.IsNotFound(err) {
 		return err
@@ -137,7 +166,7 @@ func (r *Reconciler) ensurePVC(ctx context.Context, pen *v1alpha1.Pen, size stri
 			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 			StorageClassName: &sclass,
 			Resources: corev1.VolumeResourceRequirements{
-				Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse(size)},
+				Requests: corev1.ResourceList{corev1.ResourceStorage: size},
 			},
 		},
 	}
@@ -150,7 +179,7 @@ func (r *Reconciler) ensurePVC(ctx context.Context, pen *v1alpha1.Pen, size stri
 func (r *Reconciler) ensureService(ctx context.Context, pen *v1alpha1.Pen, cfg config.Config) error {
 	key := types.NamespacedName{Name: pen.Name, Namespace: pen.Namespace}
 	svc := &corev1.Service{}
-	if err := r.Client.Get(ctx, key, svc); err == nil {
+	if err := r.Reader.Get(ctx, key, svc); err == nil {
 		return nil // create-or-leave
 	} else if !apierrors.IsNotFound(err) {
 		return err
@@ -188,10 +217,10 @@ func (r *Reconciler) ensureService(ctx context.Context, pen *v1alpha1.Pen, cfg c
 	return nil
 }
 
-func (r *Reconciler) ensurePod(ctx context.Context, pen *v1alpha1.Pen, image, cpu, memory string, cfg config.Config) error {
+func (r *Reconciler) ensurePod(ctx context.Context, pen *v1alpha1.Pen, image string, res corev1.ResourceList, cfg config.Config) error {
 	key := types.NamespacedName{Name: podName(pen.Name), Namespace: pen.Namespace}
 	pod := &corev1.Pod{}
-	if err := r.Client.Get(ctx, key, pod); err == nil {
+	if err := r.Reader.Get(ctx, key, pod); err == nil {
 		return nil // create-or-leave
 	} else if !apierrors.IsNotFound(err) {
 		return err
@@ -201,10 +230,6 @@ func (r *Reconciler) ensurePod(ctx context.Context, pen *v1alpha1.Pen, image, cp
 		hostname = pen.Name + "." + cfg.TailnetDomain
 	}
 	privileged := true
-	res := corev1.ResourceList{
-		corev1.ResourceCPU:    resource.MustParse(cpu),
-		corev1.ResourceMemory: resource.MustParse(memory),
-	}
 	secKey := "herdr-dev-" + pen.Namespace
 	cmKey := "herdr-dev-" + pen.Namespace
 	nodeSelector := cfg.NodeSelector
@@ -282,7 +307,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, pen *v1alpha1.Pen, image, cp
 // pen Service's loadBalancer ingress; "" while unassigned.
 func (r *Reconciler) serviceHostname(ctx context.Context, pen *v1alpha1.Pen) string {
 	svc := &corev1.Service{}
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: pen.Name, Namespace: pen.Namespace}, svc); err != nil {
+	if err := r.Reader.Get(ctx, types.NamespacedName{Name: pen.Name, Namespace: pen.Namespace}, svc); err != nil {
 		return ""
 	}
 	ingress := svc.Status.LoadBalancer.Ingress
@@ -309,7 +334,7 @@ func (r *Reconciler) status(ctx context.Context, pen *v1alpha1.Pen, phase v1alph
 	}
 	switch phase {
 	case v1alpha1.PhaseReady:
-		return ctrl.Result{}, nil
+		return ctrl.Result{RequeueAfter: requeueReady}, nil
 	case v1alpha1.PhaseCreating:
 		return ctrl.Result{RequeueAfter: requeueCreating}, nil
 	case v1alpha1.PhasePending:

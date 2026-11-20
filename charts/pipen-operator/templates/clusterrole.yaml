@@ -11,3 +11,6 @@ rules:
   - apiGroups: ["pens.pipen.dev"]
     resources: [pens]
     verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get]

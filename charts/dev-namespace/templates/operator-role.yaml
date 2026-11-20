@@ -11,6 +11,9 @@ metadata:
   labels:
     {{- include "dev-namespace.labels" . | nindent 4 }}
 rules:
+  - apiGroups: ["pens.pipen.dev"]
+    resources: [pens/status]
+    verbs: [update]
   - apiGroups: [""]
     resources: [pods]
     verbs: [create, get, list, watch, patch, update, delete]

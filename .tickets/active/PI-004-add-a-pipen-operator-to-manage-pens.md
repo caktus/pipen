@@ -172,12 +172,21 @@ node).
 
 ### RBAC
 
-- Operator: ClusterRole `pens get/list/watch` (read-only, custom kind only) +
-  per-ns Role in each dev namespace (created by dev-namespace): pods
-  (create/get/list/watch/patch/update/delete), services (same minus patch),
-  persistentvolumeclaims (create/get/list/watch — **no delete**), configmaps (get),
-  secrets (get). Plus a Role in the operator namespace (leases, events) for leader
-  election.
+- Operator: ClusterRole `pens get/list/watch` + `namespaces get` (read-only,
+  for the provisioned-namespace check; cluster-scoped reads are the only
+  cluster grants — the plan's original list omitted `pens/status update`
+  and `namespaces get`, which the final review found; a Pen in an
+  un-provisioned namespace gets no status write, by design: the reconcile
+  errors with backoff and only a cluster-admin can create such Pens). Per-ns
+  Role in each dev namespace (created by dev-namespace): `pens/status`
+  (update), pods (create/get/list/watch/patch/update/delete), services
+  (same minus patch), persistentvolumeclaims (create/get/list/watch — **no
+  delete**), configmaps (get), secrets (get). Plus a Role in the operator
+  namespace (leases, events, configmaps get/list/watch for the
+  namespace-scoped config informer). All non-Pen reads in the reconciler go
+  through the API reader (direct reads); the manager cache holds only Pens
+  plus the operator's own ConfigMap (scoped to the operator namespace),
+  which is what makes the per-ns grants sufficient.
 - Dev (`deploy` Role, shrunk): pens (pipen.dev) get/list/watch/create/update/delete,
   pens/status get, pods get, pods/log get.
 

@@ -125,7 +125,7 @@ func svcWithIngress(hostname, ip string) *corev1.Service {
 
 func reconcileOnce(t *testing.T, c client.Client) reconcile.Result {
 	t.Helper()
-	r := &Reconciler{Client: c, Scheme: testScheme(t), Config: testConfig()}
+	r := &Reconciler{Client: c, Reader: c, Scheme: testScheme(t), Config: testConfig()}
 	res, err := r.Reconcile(context.Background(),
 		reconcile.Request{NamespacedName: types.NamespacedName{Name: penName, Namespace: devNS}})
 	if err != nil {
@@ -313,8 +313,9 @@ func TestReconcileReady(t *testing.T) {
 	if p.Status.ObservedGeneration == 0 {
 		t.Error("observedGeneration not set")
 	}
-	if res.RequeueAfter != 0 {
-		t.Errorf("RequeueAfter = %v, want 0 when ready", res.RequeueAfter)
+	if res.RequeueAfter != requeueReady {
+		t.Errorf("RequeueAfter = %v, want %v (periodic refresh keeps status truthful and self-heals)",
+			res.RequeueAfter, requeueReady)
 	}
 }
 
@@ -382,6 +383,21 @@ func TestReconcileCreateErrorFails(t *testing.T) {
 	}
 	if res.RequeueAfter != 0 {
 		t.Errorf("RequeueAfter = %v, want 0 on failure", res.RequeueAfter)
+	}
+}
+
+func TestReconcileInvalidQuantityFails(t *testing.T) {
+	pen := newPen()
+	pen.Spec = v1alpha1.PenSpec{CPU: "bogus"}
+	objs := append([]client.Object{ownedNS(t, devNS), pen}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnce(t, c)
+	p := getPen(t, c)
+	if p.Status.Phase != v1alpha1.PhaseFailed {
+		t.Errorf("phase = %q, want Failed for invalid quantity", p.Status.Phase)
+	}
+	if p.Status.Message == "" {
+		t.Error("Failed pen has no message")
 	}
 }
 

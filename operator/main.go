@@ -15,6 +15,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -50,6 +51,17 @@ func main() {
 		HealthProbeBindAddress: ":8081",
 		LeaderElection:         true,
 		LeaderElectionID:       "pipen-operator.pipen.dev",
+		// The cache holds Pens (cluster-wide, the only cluster-scoped
+		// list/watch the operator has) plus the operator's own ConfigMap,
+		// scoped to the operator namespace so it opens no cluster-wide
+		// ConfigMap informer. Everything else is read directly (APIReader).
+		Cache: cache.Options{
+			ByObject: map[client.Object]cache.ByObject{
+				&corev1.ConfigMap{}: {
+					Namespaces: map[string]cache.Config{opNamespace: {}},
+				},
+			},
+		},
 	})
 	if err != nil {
 		fatal(err)
@@ -62,7 +74,12 @@ func main() {
 		fatal(err)
 	}
 
-	r := &penOperatorReconciler{client: mgr.GetClient(), scheme: scheme, opNamespace: opNamespace}
+	r := &penOperatorReconciler{
+		client:      mgr.GetClient(),
+		reader:      mgr.GetAPIReader(),
+		scheme:      scheme,
+		opNamespace: opNamespace,
+	}
 	if err := ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.Pen{}).
 		Watches(
@@ -80,10 +97,11 @@ func main() {
 	}
 }
 
-// penOperatorReconciler reads the operator config once per pass (fresh from
-// the manager's cache) and hands the pass to the pure pen reconciler.
+// penOperatorReconciler reads the operator config once per pass (fresh via
+// the API reader) and hands the pass to the pure pen reconciler.
 type penOperatorReconciler struct {
 	client      client.Client
+	reader      client.Reader
 	scheme      *runtime.Scheme
 	opNamespace string
 }
@@ -91,7 +109,7 @@ type penOperatorReconciler struct {
 func (r *penOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	cm := &corev1.ConfigMap{}
 	key := client.ObjectKey{Namespace: r.opNamespace, Name: config.ConfigMapName}
-	if err := r.client.Get(ctx, key, cm); err != nil {
+	if err := r.reader.Get(ctx, key, cm); err != nil {
 		// Requeue with backoff: the operator cannot create pens without
 		// its config, and the chart always ships it.
 		return ctrl.Result{}, fmt.Errorf("read operator config %s/%s: %w", r.opNamespace, config.ConfigMapName, err)
@@ -102,7 +120,7 @@ func (r *penOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		// the operator without a restart.
 		return ctrl.Result{}, fmt.Errorf("parse operator config: %w", err)
 	}
-	rec := &pen.Reconciler{Client: r.client, Scheme: r.scheme, Config: cfg}
+	rec := &pen.Reconciler{Client: r.client, Reader: r.reader, Scheme: r.scheme, Config: cfg}
 	return rec.Reconcile(ctx, req)
 }
 
