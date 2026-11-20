@@ -98,16 +98,19 @@ jobs:
         run: |
           # crane talks the registry API directly: list the tags, keep the
           # 14 newest date tags, delete the rest. :latest never matches
-          # the date-tag pattern, so it is never pruned.
+          # the date-tag pattern, so it is never pruned. The extracted
+          # binary sits in the working directory, which is not on PATH.
           curl -fsSL \
             "https://github.com/google/go-containerregistry/releases/download/v0.20.6/go-containerregistry_Linux_x86_64.tar.gz" \
             | tar xz crane
-          crane auth login ghcr.io -u "${GITHUB_ACTOR}" -p "${GITHUB_TOKEN}"
-          crane ls "${IMAGE}" \
+          crane="./crane"
+          test -x "$crane"
+          "$crane" auth login ghcr.io -u "${GITHUB_ACTOR}" -p "${GITHUB_TOKEN}"
+          "$crane" ls "${IMAGE}" \
             | grep -E '^[0-9]{8}-pi' \
             | sort -r \
             | tail -n +15 \
             | while read -r old; do
                 echo "deleting ${IMAGE}:${old}"
-                crane del "${IMAGE}:${old}"
+                "$crane" del "${IMAGE}:${old}"
               done
