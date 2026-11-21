@@ -2,16 +2,16 @@
 id: PI-002
 github_issue: 2
 github_url: https://github.com/caktus/pipen/issues/2
-last_synced: '2026-11-20T23:12:28.909675+00:00'
+last_synced: "2026-11-20T23:12:28.909675+00:00"
 synced_hash: 9f6a4cc505128d9066351149a90384ec9e933261b1bb3b9b33a7837de0fa8f5e
 title: Give herdr envs stable per-env ssh host keys
 type: Task
-assignee: '@me'
+assignee: "@me"
 labels:
-- phase/done
+  - phase/done
 context:
   relates_to:
-  - PI-001
+    - PI-001
 ---
 
 As a developer, I want each herdr env to have its own ssh host key that is stable across restarts, so that host-key verification distinguishes envs and I get one known_hosts prompt per env — instead of every env, on every boot, presenting the same image-baked key (ssh offers to confirm it "known by other names" for each new hostname).
