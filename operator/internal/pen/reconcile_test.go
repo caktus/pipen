@@ -304,6 +304,35 @@ func TestReconcileCreatesObjects(t *testing.T) {
 	}
 }
 
+// The dev ConfigMap keys are optional (a pen whose ConfigMap carries none
+// of them still boots), so the dev-config volume mounts as optional. The
+// pen pod runs no cluster-credentialed client, so it mounts no
+// ServiceAccount token.
+func TestDevConfigVolumeOptionalAndNoSAToken(t *testing.T) {
+	objs := append([]client.Object{ownedNS(t, devNS), newPen()}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnce(t, c)
+	pod := &corev1.Pod{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, pod); err != nil {
+		t.Fatal(err)
+	}
+	if pod.Spec.AutomountServiceAccountToken == nil || *pod.Spec.AutomountServiceAccountToken {
+		t.Errorf("automountServiceAccountToken = %v, want false", pod.Spec.AutomountServiceAccountToken)
+	}
+	var cm *corev1.ConfigMapVolumeSource
+	for _, v := range pod.Spec.Volumes {
+		if v.Name == "dev-config" {
+			cm = v.ConfigMap
+		}
+	}
+	if cm == nil {
+		t.Fatal("dev-config volume missing")
+	}
+	if cm.Optional == nil || !*cm.Optional {
+		t.Errorf("dev-config volume optional = %v, want true", cm.Optional)
+	}
+}
+
 // An empty runtimeClass (the kind e2e cluster shape) must leave the pod
 // with no runtime class: kind nodes run no kata runtime.
 func TestReconcileNoRuntimeClass(t *testing.T) {

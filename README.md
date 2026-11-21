@@ -6,9 +6,9 @@ environment is a pen: one machine per project, up with one command.
 Run `pipen up <name>`, then run `ssh <you>@<hostname>`. Each pen is a kata pod
 on a Mayastor storage node. kata is a virtual machine runtime. The pen runs an
 Ubuntu 26.04 guest. The guest has the full development toolchain, docker, and
-pi.dev. pi.dev connects to the litellm proxy that runs inside the cluster.
-litellm is a model routing proxy. A developer can also use their own
-model-provider account instead. Then the cluster runs no proxy. Your home
+pi.dev. pi.dev runs in shared mode against the litellm proxy in the cluster,
+or in self-provider mode against your own model-provider account with no
+proxy. litellm is a model routing proxy. Your home
 directory stays across pod restarts. You reach the pen by name on the
 tailnet. The tailnet is the Tailscale private network.
 
@@ -146,25 +146,21 @@ If you edit this repo, work from a checkout instead of the GitHub install.
    uv run cli/pipen.py --help
    ```
 
-   Running from the checkout finds `devenv/templates` on its own. It walks up
-   from your working directory. You do not set `PIPEN_TEMPLATES`
-
 2. If you want `pipen` on your PATH, install the local copy:
 
    ```sh
    uv tool install --force cli
    ```
 
-   Outside the checkout, `up` needs `PIPEN_TEMPLATES` pointed at the checkout,
-   as in the developer steps above. Use `--force` on every reinstall so the
-   local copy replaces the GitHub one
+   Use `--force` on every reinstall so the local copy replaces the GitHub
+   one
 
 ## Admins
 
 ### Prerequisites
 
 What the cluster needs before the install. A fresh admin can install pipen
-from this section alone.
+from this page alone.
 
 Hard requirements (pipen does not run without them):
 
@@ -183,14 +179,19 @@ Hard requirements (pipen does not run without them):
   client tagged `tag:k8s-operator` with write scope on General/Services,
   Devices/Core, and Keys/Auth Keys. Grant `tag:k8s` to `tag:k8s-operator`
   in `tagOwners`. Allow the service advertisement with `autoApprovers`
-  services for `tag:k8s`. The hosted-llm repo documents the full chain with
+  services for `tag:k8s`. The hosted-llm repo shows one working chain with
   values (caktus/hosted-llm#23)
 
 - **A CNI that enforces NetworkPolicy** (Calico, Cilium, or kindnet) and
-  kubernetes 1.31 or newer. The 1.31 floor is the automatic namespace label
-  `kubernetes.io/metadata.name` that the policies use. On an older cluster,
-  add a static label to the target namespace and keep `matchLabels` in the
-  dev-namespace templates
+  kubernetes 1.22 or newer. The 1.22 floor is the automatic namespace label
+  `kubernetes.io/metadata.name` that the policies use. On a cluster older
+  than 1.22, add the static label `kubernetes.io/metadata.name=<name>` to
+  every namespace a policy matches: `kube-system` (DNS), the tailscale
+  operator namespace, and each `egress.podAllows` target namespace. Keep
+  `matchLabels` in the dev-namespace templates. kindnet checks pod-to-pod
+  traffic, but it applies no policy to traffic addressed to a Service
+  (ClusterIP). Run Calico or Cilium when you need egress to in-cluster
+  Services denied
 - **kube-proxy check**: with iptables mode and `masqueradeAll: true`, the
   tailscale proxy's connections may arrive at the pen pod from the node IP
   instead of the proxy pod. If so, change the ingress allow to an ipBlock
@@ -205,7 +206,10 @@ matching value):
 - **Storage for pen homes** — the defaults assume OpenEBS Mayastor (chart
   `openebs/openebs` from https://openebs.github.io/openebs, storage class
   `mayastor-2`). Any StorageClass works: set `config.storageClass` and
-  `config.nodeSelector`
+  `config.nodeSelector`. If the kata guest talks to the Mayastor home-PVC
+  gateway through the pod network, default-deny egress blocks it. Allow the
+  gateway with `egress.podAllows` or `egress.cidrAllows` (dev-namespace
+  chart)
 - **Kata containers runtime** on the nodes, for the default
   `config.runtimeClass: kata`. Set the value to empty to run without a
   runtime class
@@ -222,19 +226,21 @@ Optional:
 The chart defaults assume this repo's reference cluster. An external org
 sets these values and nothing else:
 
-| Value                                          | Chart          | Default                                | Meaning                                     |
-| ---------------------------------------------- | -------------- | -------------------------------------- | ------------------------------------------- |
-| `image`                                        | pipen-operator | `ghcr.io/caktus/pipen-operator:latest` | the operator image                          |
-| `config.image`                                 | pipen-operator | `ghcr.io/caktus/pipen:latest`          | the pen pod image                           |
-| `config.storageClass`                          | pipen-operator | `mayastor-2`                           | the home PVC class                          |
-| `config.nodeSelector`                          | pipen-operator | `openebs.io/engine: mayastor`          | the home volume nodes                       |
-| `config.runtimeClass`                          | pipen-operator | `kata`                                 | empty runs no runtime class                 |
-| `config.loadBalancerClass`                     | pipen-operator | `tailscale`                            | pen Service exposure                        |
-| `config.serviceAnnotations`                    | pipen-operator | `tailscale.com/expose: "true"`         | pen Service annotations                     |
-| `config.tailnetDomain`                         | pipen-operator | empty                                  | informational, printed hostnames            |
-| `tailscale.namespace`                          | dev-namespace  | `tailscale`                            | the operator namespace                      |
-| `egress.podAllows`, `egress.cidrAllows`        | dev-namespace  | empty                                  | in-cluster model endpoints and other egress |
-| `dev`, `namespacePrefix`, `operator.namespace` | dev-namespace  | `<dev>`, `env-`, `pipen`               | naming                                      |
+| Value                                          | Chart          | Default                                | Meaning                                                |
+| ---------------------------------------------- | -------------- | -------------------------------------- | ------------------------------------------------------ |
+| `image`                                        | pipen-operator | `ghcr.io/caktus/pipen-operator:latest` | the operator image                                     |
+| `config.image`                                 | pipen-operator | `ghcr.io/caktus/pipen:latest`          | the pen pod image                                      |
+| `config.storageClass`                          | pipen-operator | `mayastor-2`                           | the home PVC class                                     |
+| `config.nodeSelector`                          | pipen-operator | `openebs.io/engine: mayastor`          | the home volume nodes                                  |
+| `config.runtimeClass`                          | pipen-operator | `kata`                                 | empty runs no runtime class                            |
+| `config.loadBalancerClass`                     | pipen-operator | `tailscale`                            | pen Service exposure                                   |
+| `config.serviceAnnotations`                    | pipen-operator | `tailscale.com/expose: "true"`         | pen Service annotations                                |
+| `config.tailnetDomain`                         | pipen-operator | empty                                  | informational, printed hostnames                       |
+| `tailscale.namespace`                          | dev-namespace  | `tailscale`                            | the operator namespace                                 |
+| `egress.podAllows`, `egress.cidrAllows`        | dev-namespace  | empty                                  | in-cluster model endpoints and other egress            |
+| `dev`, `namespacePrefix`, `operator.namespace` | dev-namespace  | required, `env-`, `pipen`              | naming. `dev` is required: the render fails without it |
+
+The full value lists and defaults live in each chart README.
 
 ### 1. The dev image (GHCR, built nightly)
 
@@ -335,7 +341,7 @@ Install the chart from the chart repository:
 ```sh
 helm repo add pipen https://caktus.github.io/pipen
 helm repo update pipen
-helm install <dev> pipen/dev-namespace --version 0.5.1 \
+helm install <dev> pipen/dev-namespace --version 0.6.0 \
   --set dev=<dev> \
   --set 'authorizedKeys[0]=<ssh public key 1>' \
   --set 'authorizedKeys[1]=<ssh public key 2>'
@@ -374,7 +380,9 @@ sure that it is filled before you read it.
 ### 4. Create the dev ConfigMap
 
 The ConfigMap `herdr-dev-<namespace>` (namespace `env-<dev>` under the default prefix) holds the runtime
-configuration that the operator projects into each pen. Every entry is
+configuration that the operator projects into each pen. The ConfigMap must
+exist even when empty: the operator waits for the object before it creates
+a pen. Every entry is
 optional: a pen whose ConfigMap carries none of them still boots, and the
 developer signs in to their own provider account inside.
 

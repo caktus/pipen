@@ -4,8 +4,8 @@
 #     link-local ranges)
 #   - DNS to kube-dns (port 53 tcp+udp) in kube-system
 #   - any in-cluster allow set via .Values.egress (see the chart README)
-# Without a default-deny rule a NetworkPolicy cannot block egress, so this
-# empty rule and the allow rules live in the same policy and are ORed.
+# policyTypes: Egress default-denies every egress; the allow rules are the
+# only exceptions and are ORed.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -19,8 +19,7 @@ spec:
   policyTypes:
     - Egress
   egress:
-    # deny all egress by default; the rules below are the only exceptions
-    - {}
+    # the rules below are the only egress allowed
     # public internet, minus the private and reserved ranges
     - to:
         - ipBlock:
@@ -33,7 +32,7 @@ spec:
               - 127.0.0.0/8
               - 169.254.0.0/16
     # DNS to kube-dns. kube-system carries the auto namespace label
-    # kubernetes.io/metadata.name=kube-system (GA in kubernetes 1.31).
+    # kubernetes.io/metadata.name=kube-system (since kubernetes 1.22).
     - to:
         - namespaceSelector:
             matchLabels:
