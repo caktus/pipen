@@ -9,6 +9,13 @@
       "skillPath": "deploying-to-kubernetes/SKILL.md",
       "computedHash": "7ded7a3c562cffcee52728404e70ecc27136f108caebc3c574f662e02095958f"
     },
+    "docker-build-strategies": {
+      "source": "docker/skills",
+      "commit": "caeee2024f7527d890a29dd1732b62a112f56d0e",
+      "sourceType": "github",
+      "skillPath": "skills/docker-build-strategies/SKILL.md",
+      "computedHash": "a9cc5c3839d60ec8e7ca390292e1d4784bc69cf962413cb17364e7b5a46783e1"
+    },
     "draft-tickets": {
       "source": "git@github.com:caktus/skills.git",
       "sourceUrl": "git@github.com:caktus/skills.git",
@@ -17,6 +24,83 @@
       "skillPath": "draft-tickets/SKILL.md",
       "computedHash": "f15c0d9be3b5c85476cd7499c75fa2f73ec335ce41a4b050d9fd38b6b32c5947"
     },
+    "golang-code-style": {
+      "source": "samber/cc-skills-golang",
+      "commit": "d68d80aec298e1b74b37c2a472c002b5217248b3",
+      "sourceType": "github",
+      "skillPath": "skills/golang-code-style/SKILL.md",
+      "computedHash": "8013e3aeeb53e66e8dd52a1dd2d2f622ed59cde7426fad7f42c77de7fca424f8"
+    },
+    "golang-concurrency": {
+      "source": "samber/cc-skills-golang",
+      "commit": "d68d80aec298e1b74b37c2a472c002b5217248b3",
+      "sourceType": "github",
+      "skillPath": "skills/golang-concurrency/SKILL.md",
+      "computedHash": "c6c1829be72bba6eb7b2346561bb895605c65eacf35a2535bfca9828006a69e0"
+    },
+    "golang-context": {
+      "source": "samber/cc-skills-golang",
+      "commit": "d68d80aec298e1b74b37c2a472c002b5217248b3",
+      "sourceType": "github",
+      "skillPath": "skills/golang-context/SKILL.md",
+      "computedHash": "b3d709c734ef05f0ad6a48719d64f2b942f1ae1ef11e5d77975201c95c2a06e0"
+    },
+    "golang-continuous-integration": {
+      "source": "samber/cc-skills-golang",
+      "commit": "d68d80aec298e1b74b37c2a472c002b5217248b3",
+      "sourceType": "github",
+      "skillPath": "skills/golang-continuous-integration/SKILL.md",
+      "computedHash": "9fbae059833a865d905f6341498fc26b9e50f9b782fffb3bbb68b87ce48ff53c"
+    },
+    "golang-dependency-management": {
+      "source": "samber/cc-skills-golang",
+      "commit": "d68d80aec298e1b74b37c2a472c002b5217248b3",
+      "sourceType": "github",
+      "skillPath": "skills/golang-dependency-management/SKILL.md",
+      "computedHash": "f06642b4f2b10af0adf0b3b454545bf645b83e9f226c3f2a34717754fd339157"
+    },
+    "golang-error-handling": {
+      "source": "samber/cc-skills-golang",
+      "commit": "d68d80aec298e1b74b37c2a472c002b5217248b3",
+      "sourceType": "github",
+      "skillPath": "skills/golang-error-handling/SKILL.md",
+      "computedHash": "81f5c3fcd0324c4ed9b8ee50d3375b0f3074b0308ee9b5c0778d6cbf32bedf9c"
+    },
+    "golang-naming": {
+      "source": "samber/cc-skills-golang",
+      "commit": "d68d80aec298e1b74b37c2a472c002b5217248b3",
+      "sourceType": "github",
+      "skillPath": "skills/golang-naming/SKILL.md",
+      "computedHash": "81ff21a879a65ded0f26cd2f71edf913f07bcd4f4c4521b260875fd15df8fc94"
+    },
+    "golang-refactoring": {
+      "source": "samber/cc-skills-golang",
+      "commit": "d68d80aec298e1b74b37c2a472c002b5217248b3",
+      "sourceType": "github",
+      "skillPath": "skills/golang-refactoring/SKILL.md",
+      "computedHash": "afcb3185fb37cddc213ed99c4cd4bbb2459b78048de5b59503537e79ca220eb3"
+    },
+    "golang-safety": {
+      "source": "samber/cc-skills-golang",
+      "commit": "d68d80aec298e1b74b37c2a472c002b5217248b3",
+      "sourceType": "github",
+      "skillPath": "skills/golang-safety/SKILL.md",
+      "computedHash": "6e1aab5624f6a99e3384bfe6b7a8810d5063df9362f7633ce38812fcaf52eb17"
+    },
+    "golang-testing": {
+      "source": "samber/cc-skills-golang",
+      "commit": "d68d80aec298e1b74b37c2a472c002b5217248b3",
+      "sourceType": "github",
+      "skillPath": "skills/golang-testing/SKILL.md",
+      "computedHash": "adfaf95d45383e8e579de1770ea0f25d0729b3e94e0b003ea08d1646646f7247"
+    },
+    "golang-troubleshooting": {
+      "source": "samber/cc-skills-golang",
+      "commit": "d68d80aec298e1b74b37c2a472c002b5217248b3",
+      "sourceType": "github",
+      "skillPath": "skills/golang-troubleshooting/SKILL.md",
+      "computedHash": "c234f844f87c46cd6ab66f1ba2b2fad54997c03a78b441d7ab39d94649589ff3"
+    },
     "helm-app-chart": {
       "source": "git@github.com:caktus/skills.git",
       "sourceUrl": "git@github.com:caktus/skills.git",
@@ -24,6 +108,48 @@
       "sourceType": "git",
       "skillPath": "helm-app-chart/SKILL.md",
       "computedHash": "78485734889d31c18813159f70b44b3cb23c2f18dec611a803061ee7159c057d"
+    },
+    "k8s-helm-troubleshooting": {
+      "source": "k8s-servant/k8s-skills",
+      "commit": "0229910c2618f9021ed9f4eb0b5a4fb33fb55581",
+      "sourceType": "github",
+      "skillPath": "skills/k8s-helm-troubleshooting/SKILL.md",
+      "computedHash": "34b4ba32c3968d43e07faaaa05f42830e8d6951e83f6ce150bd09003f2a896f8"
+    },
+    "k8s-network-troubleshooting": {
+      "source": "k8s-servant/k8s-skills",
+      "commit": "0229910c2618f9021ed9f4eb0b5a4fb33fb55581",
+      "sourceType": "github",
+      "skillPath": "skills/k8s-network-troubleshooting/SKILL.md",
+      "computedHash": "42d836e9684711fc0a8ec960dda39d28c28c5ef4f3071649cce246f2d0c61bef"
+    },
+    "k8s-rbac-troubleshooting": {
+      "source": "k8s-servant/k8s-skills",
+      "commit": "0229910c2618f9021ed9f4eb0b5a4fb33fb55581",
+      "sourceType": "github",
+      "skillPath": "skills/k8s-rbac-troubleshooting/SKILL.md",
+      "computedHash": "92fa132693c42c8f67a31c5c76fd80fb67a1c5a78386f0d90254a14a60c9452e"
+    },
+    "k8s-storage-troubleshooting": {
+      "source": "k8s-servant/k8s-skills",
+      "commit": "0229910c2618f9021ed9f4eb0b5a4fb33fb55581",
+      "sourceType": "github",
+      "skillPath": "skills/k8s-storage-troubleshooting/SKILL.md",
+      "computedHash": "e7b72d197b461d07c72e1fc242a278674510497004efdbaafc1daaffebec78c5"
+    },
+    "k8s-triage": {
+      "source": "k8s-servant/k8s-skills",
+      "commit": "0229910c2618f9021ed9f4eb0b5a4fb33fb55581",
+      "sourceType": "github",
+      "skillPath": "skills/k8s-triage/SKILL.md",
+      "computedHash": "cb7f4bcaf6e5439380403158cc8e0033dae8988b256a440aeda942a4122373d2"
+    },
+    "k8s-workload-troubleshooting": {
+      "source": "k8s-servant/k8s-skills",
+      "commit": "0229910c2618f9021ed9f4eb0b5a4fb33fb55581",
+      "sourceType": "github",
+      "skillPath": "skills/k8s-workload-troubleshooting/SKILL.md",
+      "computedHash": "75405ac77f923ae15f9cbb884d290097838125fb2d0c4c6b31e3a1ec994a4fd8"
     },
     "simple-english": {
       "source": "AminBlg/SimpleEnglish",
