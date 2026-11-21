@@ -2,8 +2,8 @@
 id: PI-015
 github_issue: 15
 github_url: https://github.com/caktus/pipen/issues/15
-last_synced: "2026-11-21T02:05:16.658440+00:00"
-synced_hash: 19bef777a04a60df9bb5767413c4fe7c9211a1eb4f18b0e09c627687b9ea47ee
+last_synced: "2026-11-21T03:56:05.586464+00:00"
+synced_hash: e3a98aff8e1e79f0d7aa49f33d83926df96533bad3f830df6413eebb8c8c7c8a
 title: Name the guest dev user after the developer
 type: Bug
 assignee: "@me"
@@ -22,13 +22,13 @@ The operator sets `DEV_USER` to the Pen's namespace (`operator/internal/pen/reco
 ### To Do
 
 - Decide where the operator reads the dev name from: the `herdr.dev/owner` namespace label vs an operator config value
-- Plan the migration for existing envs: their persistent `/home` volume holds data under `/home/env-<dev>/`, which must land in `/home/<dev>/` when the user is renamed
+- No data migration: the renamed user starts from an empty home, and the old `/home/env-<dev>/` directory stays untouched on the volume
 
 ## AC
 
 - [ ] The operator sets `DEV_USER` to the developer name, and a unit test asserts `DEV_USER` is the `herdr.dev/owner` value, not the namespace name
 - [ ] In the kind e2e, the pen pod's unix user is `<dev>` and key ssh lands in `/home/<dev>`
-- [ ] An env with existing data under `/home/env-<dev>/` has that data available under `/home/<dev>/` after pod recreation on the new operator, with no data loss
+- [ ] An env whose home volume has data under `/home/env-<dev>/` recreates its pod with the new operator: ssh lands in an empty `/home/<dev>`, the old directory stays untouched (no migration)
 - [ ] The dev-namespace chart README (its `DEV_USER` note) and the hosted-llm docs (`README-herdr.md`, the bootstrap play's next-steps message) say the guest user is the dev name, and the operator ships a new version pin
 
 ## Related tickets
