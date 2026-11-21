@@ -35,4 +35,9 @@ An adversarial security review (2026-11-21, all 18 pinned skills) found no malic
 
 ## Checks
 
-Run `pre-commit run --all-files` before you commit. CI mirrors it in `.github/workflows/verify.yml`.
+- Install the hook once per clone: `uv run pre-commit install`. It
+  hard-blocks a commit when any check fails.
+- Run `pre-commit run --all-files` before you commit. Check its exit code.
+  Do not pipe its output through `tail` or another command. A pipe hides
+  the exit code and lets a failure pass.
+- CI mirrors the checks in `.github/workflows/verify.yml`.
