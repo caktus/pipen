@@ -36,7 +36,7 @@ egress:
   # Targets by namespace, pod selector and port. Each entry needs namespace
   # and podSelector (a label map); port is optional (omit it to allow all
   # ports to those pods). For example the litellm proxy pod in a litellm
-  # namespace:
+  # namespace — the same rule pattern serves any in-cluster model endpoint:
   #   - namespace: litellm
   #     podSelector:
   #       app: litellm

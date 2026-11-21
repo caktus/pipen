@@ -7,9 +7,10 @@ Run `pipen up <name>`, then run `ssh <you>@<hostname>`. Each pen is a kata pod
 on a Mayastor storage node. kata is a virtual machine runtime. The pen runs an
 Ubuntu 26.04 guest. The guest has the full development toolchain, docker, and
 pi.dev. pi.dev connects to the litellm proxy that runs inside the cluster.
-litellm is a model routing proxy. Your home directory stays across pod
-restarts. You reach the pen by name on the tailnet. The tailnet is the
-Tailscale private network.
+litellm is a model routing proxy. A developer can also use their own
+model-provider account instead. Then the cluster runs no proxy. Your home
+directory stays across pod restarts. You reach the pen by name on the
+tailnet. The tailnet is the Tailscale private network.
 
 This repo holds the general toolchain. Your cluster's private deployment repo
 holds the cluster-specific parts: storage nodes, litellm keys, and
@@ -39,8 +40,10 @@ docker.io direnv npm unzip`, uv, fnm, Node 24, and
   `@earendil-works/pi-coding-agent` (`pi`)
 - docker inside the pen (dockerd in a privileged kata guest)
 - pi.dev against the cluster-internal litellm proxy
-  (`http://litellm.litellm.svc.cluster.local:4000`). The guest needs no
-  tailnet DNS. Your per-developer key lives in `~/.litellm_key`
+  (`http://litellm.litellm.svc.cluster.local:4000`) in shared mode. The
+  guest needs no tailnet DNS. Your per-developer key lives in
+  `~/.litellm_key`. In self-provider mode the pen carries the provider
+  configuration for your own account and no proxy is involved
 - A persistent `/home` on a mirrored `mayastor-2` PVC (10 GiB by default). It
   survives pod deletion. It re-attaches on either storage node
 - ssh to the pen over the tailnet. The Tailscale operator gives each pen a
@@ -158,6 +161,81 @@ If you edit this repo, work from a checkout instead of the GitHub install.
 
 ## Admins
 
+### Prerequisites
+
+What the cluster needs before the install. A fresh admin can install pipen
+from this section alone.
+
+Hard requirements (pipen does not run without them):
+
+- **tailscale-operator** — the only ingress path. It exposes each pen
+  Service on the tailnet (L4) and runs the L3 ssh proxy that the
+  dev-namespace NetworkPolicy admits. A cluster that cannot run it is
+  unsupported. Install once, in namespace `tailscale`:
+
+  ```sh
+  helm repo add tailscale https://pkgs.tailscale.com/helmcharts
+  helm install tailscale-operator tailscale/tailscale-operator
+  ```
+
+  If the operator runs in another namespace, set `tailscale.namespace` in
+  the dev-namespace chart. One-time admin-console setup: create an OAuth
+  client tagged `tag:k8s-operator` with write scope on General/Services,
+  Devices/Core, and Keys/Auth Keys. Grant `tag:k8s` to `tag:k8s-operator`
+  in `tagOwners`. Allow the service advertisement with `autoApprovers`
+  services for `tag:k8s`. The hosted-llm repo documents the full chain with
+  values (caktus/hosted-llm#23)
+
+- **A CNI that enforces NetworkPolicy** (Calico, Cilium, or kindnet) and
+  kubernetes 1.31 or newer. The 1.31 floor is the automatic namespace label
+  `kubernetes.io/metadata.name` that the policies use. On an older cluster,
+  add a static label to the target namespace and keep `matchLabels` in the
+  dev-namespace templates
+- **kube-proxy check**: with iptables mode and `masqueradeAll: true`, the
+  tailscale proxy's connections may arrive at the pen pod from the node IP
+  instead of the proxy pod. If so, change the ingress allow to an ipBlock
+  of the node CIDR on port 22, or use the eBPF datapath. Check before
+  rollout
+- **Public GHCR packages** for `ghcr.io/caktus/pipen` (the dev image) and
+  `ghcr.io/caktus/pipen-operator` (see steps 1 and 2)
+
+Default-install requirements (any alternative works when you set the
+matching value):
+
+- **Storage for pen homes** — the defaults assume OpenEBS Mayastor (chart
+  `openebs/openebs` from https://openebs.github.io/openebs, storage class
+  `mayastor-2`). Any StorageClass works: set `config.storageClass` and
+  `config.nodeSelector`
+- **Kata containers runtime** on the nodes, for the default
+  `config.runtimeClass: kata`. Set the value to empty to run without a
+  runtime class
+
+Optional:
+
+- **litellm proxy** — a shared model endpoint with per-developer keys (the
+  BerriAI `litellm` helm chart). Without it, each developer signs in to
+  their own provider account inside the pen. Reach the proxy pod from a dev
+  namespace with `egress.podAllows` (the example in the dev-namespace values
+  shows the rule; the same rule pattern serves any in-cluster model
+  endpoint)
+
+The chart defaults assume this repo's reference cluster. An external org
+sets these values and nothing else:
+
+| Value                                          | Chart          | Default                                | Meaning                                     |
+| ---------------------------------------------- | -------------- | -------------------------------------- | ------------------------------------------- |
+| `image`                                        | pipen-operator | `ghcr.io/caktus/pipen-operator:latest` | the operator image                          |
+| `config.image`                                 | pipen-operator | `ghcr.io/caktus/pipen:latest`          | the pen pod image                           |
+| `config.storageClass`                          | pipen-operator | `mayastor-2`                           | the home PVC class                          |
+| `config.nodeSelector`                          | pipen-operator | `openebs.io/engine: mayastor`          | the home volume nodes                       |
+| `config.runtimeClass`                          | pipen-operator | `kata`                                 | empty runs no runtime class                 |
+| `config.loadBalancerClass`                     | pipen-operator | `tailscale`                            | pen Service exposure                        |
+| `config.serviceAnnotations`                    | pipen-operator | `tailscale.com/expose: "true"`         | pen Service annotations                     |
+| `config.tailnetDomain`                         | pipen-operator | empty                                  | informational, printed hostnames            |
+| `tailscale.namespace`                          | dev-namespace  | `tailscale`                            | the operator namespace                      |
+| `egress.podAllows`, `egress.cidrAllows`        | dev-namespace  | empty                                  | in-cluster model endpoints and other egress |
+| `dev`, `namespacePrefix`, `operator.namespace` | dev-namespace  | `<dev>`, `env-`, `pipen`               | naming                                      |
+
 ### 1. The dev image (GHCR, built nightly)
 
 The dev image builds in this repo's GitHub Actions workflow
@@ -257,7 +335,7 @@ Install the chart from the chart repository:
 ```sh
 helm repo add pipen https://caktus.github.io/pipen
 helm repo update pipen
-helm install <dev> pipen/dev-namespace --version 0.5.0 \
+helm install <dev> pipen/dev-namespace --version 0.5.1 \
   --set dev=<dev> \
   --set 'authorizedKeys[0]=<ssh public key 1>' \
   --set 'authorizedKeys[1]=<ssh public key 2>'
@@ -296,11 +374,19 @@ sure that it is filled before you read it.
 ### 4. Create the dev ConfigMap
 
 The ConfigMap `herdr-dev-<namespace>` (namespace `env-<dev>` under the default prefix) holds the runtime
-configuration that the operator projects into each pen:
+configuration that the operator projects into each pen. Every entry is
+optional: a pen whose ConfigMap carries none of them still boots, and the
+developer signs in to their own provider account inside.
 
-- The rendered pi configuration: `models.json` (litellm baseUrl rewritten to
-  the cluster-internal address) and `settings.json`
-- The per-developer litellm key (`litellm_key`)
+Two supported modes:
+
+- **litellm-backed (the shared proxy):** `models.json` (the litellm baseUrl
+  rewritten to the cluster-internal address) and `settings.json`, plus the
+  per-developer litellm key as `litellm_key`. The entrypoint places the key
+  at `~/.litellm_key` (0600)
+- **Self-provider:** `models.json` (and optionally `settings.json`) for the
+  developer's own provider account, no key file. The developer pastes their
+  own key inside the pen
 
 The rendering and key management belong to your cluster tooling (the private
 deployment repo).
@@ -322,12 +408,14 @@ token: <sa-token>
 
 ### Revoke a developer
 
-1. Revoke the litellm key (litellm console or `/key/delete`)
+1. If the cluster uses the litellm proxy, revoke the developer's key (litellm console or `/key/delete`)
 2. Run `helm uninstall <dev>` (removes the chart's namespace, RBAC, and
    secrets)
 3. Delete `.herdr-<dev>.yaml`
 4. The home PVCs (and their data) go with the namespace when you delete it.
-   Run `kubectl delete ns env-<dev>`. This deletes the home data
+   Run `kubectl delete ns env-<dev>`. This deletes the home data. Any
+   `~/.litellm_key` file left on a pen home goes with it. The key is inert
+   once revoked server-side
 
 ### Wipe the home data for one pen
 

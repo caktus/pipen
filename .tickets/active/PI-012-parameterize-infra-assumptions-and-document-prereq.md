@@ -2,13 +2,13 @@
 id: PI-012
 github_issue: 12
 github_url: https://github.com/caktus/pipen/issues/12
-last_synced: '2026-11-21T00:40:43.829981+00:00'
+last_synced: "2026-11-21T00:46:05.144160+00:00"
 synced_hash: 8f9e0bbdea6b7d55f995ee1f02013f2710bf9f680faebdd137c64644a996b394
 title: Parameterize infra assumptions and document prerequisites
 type: Task
-assignee: '@me'
+assignee: "@me"
 labels:
-- phase/draft
+  - phase/review
 context:
   relates_to: []
 ---
@@ -16,18 +16,22 @@ context:
 As an admin deploying pipen to a cluster, I want every infrastructure assumption (litellm, storage, kata, org images) to be a configuration parameter and every real prerequisite to be documented, so that pipen deploys on a different cluster without source edits. Tailscale is a hard requirement, not a parameter.
 
 ### To Do
+
 - Add a Prerequisites section to the README that lists each external dependency with its helm chart, repo, and the optional ones (the litellm proxy is optional: developers can log in to their own model-provider accounts instead).
 - Make the devenv entrypoint tolerate a dev ConfigMap with no litellm key or models.json, and document the mayastor/kata/caktus-org defaults as overridable cluster-shape values. Document the full tailscale-operator prerequisite chain (chart + admin-console setup) in this repo's README as a hard requirement.
 
 ## AC
+
 - [ ] The README Prerequisites section lists every required chart and cluster feature (tailscale-operator, CNI that enforces NetworkPolicy, kubernetes version, storage, runtime class), names the litellm proxy chart as optional, and a fresh admin can install pipen from it alone.
 - [ ] A pen boots with a dev ConfigMap that has no `litellm_key` and no `models.json`, and the developer signs in to their own provider account inside the pen.
 
 ## Related tickets
+
 - caktus/hosted-llm#23 (tailscale operator + tailnet ingress, the worked example of the operator prerequisites)
 - caktus/hosted-llm#19 (litellm proxy on microk8s, the optional dependency)
 
 <!-- tickets:research -->
+
 Scout pass over this repo and its dependency on the `caktus/hosted-llm` stack (2026-11-21). hosted-llm itself is fine carrying its own assumptions; this ticket covers what pipen hard-codes.
 
 ## Where pipen assumes the hosted-llm / caktus stack
@@ -49,15 +53,16 @@ Scout pass over this repo and its dependency on the `caktus/hosted-llm` stack (2
 
 ## Helm charts the stack truly depends on
 
-| Chart | Repo | Required? | Notes |
-| --- | --- | --- | --- |
-| tailscale-operator | pkgs.tailscale.com/helmcharts | Required | L4 pen exposure + L3 ssh proxy; needs admin-console OAuth client, tagOwners, autoApprovers (caktus/hosted-llm#23 documents the full chain) |
-| openebs (Mayastor) | openebs.github.io/openebs | Required by the default values | provides the `mayastor-2` storage class the default `storageClass` names |
-| kata-containers runtime | (node-level, not a helm chart) | Required by the default values | `runtimeClass: kata`; set empty to disable |
-| litellm (berriai litellm-helm) | github.com/BerriAI/litellm (helm/) | Optional | shared model endpoint + per-dev keys; without it developers use their own provider accounts |
-| pipen-operator, dev-namespace | this repo (chart-releaser) | Required | the product itself |
+| Chart                          | Repo                               | Required?                      | Notes                                                                                                                                      |
+| ------------------------------ | ---------------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| tailscale-operator             | pkgs.tailscale.com/helmcharts      | Required                       | L4 pen exposure + L3 ssh proxy; needs admin-console OAuth client, tagOwners, autoApprovers (caktus/hosted-llm#23 documents the full chain) |
+| openebs (Mayastor)             | openebs.github.io/openebs          | Required by the default values | provides the `mayastor-2` storage class the default `storageClass` names                                                                   |
+| kata-containers runtime        | (node-level, not a helm chart)     | Required by the default values | `runtimeClass: kata`; set empty to disable                                                                                                 |
+| litellm (berriai litellm-helm) | github.com/BerriAI/litellm (helm/) | Optional                       | shared model endpoint + per-dev keys; without it developers use their own provider accounts                                                |
+| pipen-operator, dev-namespace  | this repo (chart-releaser)         | Required                       | the product itself                                                                                                                         |
 
 <!-- tickets:plan -->
+
 Plan for an implementer. Steps are ordered; each is independently verifiable. No step changes default behavior.
 
 ## 1. README: one Prerequisites section (docs, no code)
@@ -65,15 +70,18 @@ Plan for an implementer. Steps are ordered; each is independently verifiable. No
 New "Prerequisites" section in the Admins area, before "1. The dev image". For each dependency: what it is, the helm chart (repo + release name + where the version pin lives) or node requirement, and a required/optional marker.
 
 Hard requirements (pipen does not run without them):
+
 - **tailscale-operator** — `helm repo add tailscale https://pkgs.tailscale.com/helmcharts; helm install tailscale-operator tailscale/tailscale-operator` in namespace `tailscale`. It is the only ingress path (L4 pen exposure + the L3 ssh proxy the dev-namespace NetworkPolicy admits), so clusters that cannot run it are unsupported. Admin-console prerequisites: an OAuth client tagged `tag:k8s-operator` (write on General/Services, Devices/Core, Keys/Auth Keys), `tagOwners` granting `tag:k8s` to `tag:k8s-operator`, and `autoApprovers` services for `tag:k8s`. Cite caktus/hosted-llm#23 as the worked example. The existing `tailscale.namespace` dev-namespace value already covers operators that run in a non-default namespace; that stays the only tailscale parameter.
 
 Required (default install):
+
 - **A CNI that enforces NetworkPolicy** (Calico, Cilium, or kindnet) and kubernetes >= 1.31 for the `kubernetes.io/metadata.name` namespace label; note the kube-proxy `masqueradeAll: true` caveat (move it up out of the dev-namespace 0.4.0 change note).
 - **Storage for pen homes** — the defaults assume OpenEBS Mayastor (`openebs/openebs` chart from openebs.github.io/openebs, storage class `mayastor-2`); any StorageClass works if `config.storageClass` and `config.nodeSelector` are set.
 - **Kata containers runtime** on the nodes, for the default `config.runtimeClass: kata`; set the value empty where absent.
 - **Public GHCR packages** for the dev image and the operator (already documented; keep one pointer here).
 
 Optional:
+
 - **litellm proxy** (BerriAI `litellm` helm chart) — shared model endpoint with per-developer keys. Without it, each developer logs in to their own provider account inside the pen; nothing else in pipen needs the proxy. The dev namespace egress to the proxy pod then comes from `egress.podAllows` (already the designed path).
 
 ## 2. Make the dev ConfigMap provider-agnostic (devenv + docs)

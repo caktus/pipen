@@ -203,8 +203,8 @@ jobs:
             --set 'authorizedKeys[0]=ssh-ed25519 AAAACIKEY e2e'
       - name: Create the dev bootstrap ConfigMap
         run: |
-          # the dev-namespace README hands this step to the admin; the
-          # env pod's dev-config volume requires all three keys
+          # the dev-namespace README hands this step to the admin; the e2e
+          # exercises the litellm-backed path and carries all three keys
           cat <<'EOF' | kubectl apply -f -
           apiVersion: v1
           kind: ConfigMap

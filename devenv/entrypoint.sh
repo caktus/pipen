@@ -7,6 +7,9 @@
 #   /run/herdr/config/{models.json,settings.json,litellm_key}
 #                                       — env ConfigMap built from
 #                                         `herdr-dev-<namespace>` (bootstrap)
+# The config files are each optional: a pen whose ConfigMap carries none of
+# them still boots, and the developer signs in to their own model-provider
+# account inside.
 # Env: DEV_USER (required), TAILNET_HOSTNAME (informational).
 #
 # /home is the per-env mayastor-2 PVC: the dev user's home lives there and
@@ -51,16 +54,24 @@ install -m 600 -o "${DEV_USER}" -g "${DEV_USER}" \
     /run/herdr/secret/authorized_keys "${DEV_HOME}/.ssh/authorized_keys"
 
 # --- pi.dev config from the projected ConfigMap (0600: models.json carries
-# --- the litellm key)
-install -d -m 700 -o "${DEV_USER}" -g "${DEV_USER}" "${DEV_HOME}/.pi/agent"
-install -m 600 -o "${DEV_USER}" -g "${DEV_USER}" \
-    /run/herdr/config/models.json "${DEV_HOME}/.pi/agent/models.json"
-install -m 600 -o "${DEV_USER}" -g "${DEV_USER}" \
-    /run/herdr/config/settings.json "${DEV_HOME}/.pi/agent/settings.json"
+# --- the model provider key). Each file is optional, see the header:
+# --- a pen without any of them boots and the developer signs in by hand.
+if [ -e /run/herdr/config/models.json ]; then
+    install -d -m 700 -o "${DEV_USER}" -g "${DEV_USER}" "${DEV_HOME}/.pi/agent"
+    install -m 600 -o "${DEV_USER}" -g "${DEV_USER}" \
+        /run/herdr/config/models.json "${DEV_HOME}/.pi/agent/models.json"
+fi
+if [ -e /run/herdr/config/settings.json ]; then
+    install -d -m 700 -o "${DEV_USER}" -g "${DEV_USER}" "${DEV_HOME}/.pi/agent"
+    install -m 600 -o "${DEV_USER}" -g "${DEV_USER}" \
+        /run/herdr/config/settings.json "${DEV_HOME}/.pi/agent/settings.json"
+fi
 
-# --- litellm key (0600), same placement as the dev-VM flow
-install -m 600 -o "${DEV_USER}" -g "${DEV_USER}" \
-    /run/herdr/config/litellm_key "${DEV_HOME}/.litellm_key"
+# --- model provider key (0600), same placement as the dev-VM flow
+if [ -e /run/herdr/config/litellm_key ]; then
+    install -m 600 -o "${DEV_USER}" -g "${DEV_USER}" \
+        /run/herdr/config/litellm_key "${DEV_HOME}/.litellm_key"
+fi
 
 # direnv hook in the dev user's .bashrc (dev-VM convention; idempotent).
 # Plain shell — not `bash -c '…' -u HOME=…`: with -c the operands after the
