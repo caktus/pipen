@@ -20,15 +20,16 @@ Or from a repo checkout: `helm install <dev> charts/dev-namespace ...`.
 
 ## Values
 
-| Name                  | Type   | Description                                                                                                                                                                                  |
-| --------------------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `dev`                 | string | Developer identity. It is the namespace label `herdr.dev/owner` and the prefix the CLI force-adds to every pen name (`<dev>-<env>`). The namespace itself is named `<namespacePrefix><dev>`. |
-| `namespacePrefix`     | string | Prefix of the namespace name, default `env-` (namespace `env-tobias` for dev `tobias`). The composed name must be RFC 1123 and 63 characters or fewer.                                       |
-| `authorizedKeys`      | list   | ssh public keys, written to the `authorized_keys` Secret key of `herdr-dev-<namespace>`.                                                                                                     |
-| `operator.namespace`  | string | Namespace of the cluster-wide operator that the chart grants per-namespace write access to (default `pipen`).                                                                                |
-| `tailscale.namespace` | string | Namespace where the tailscale-operator L3 ssh proxy runs. The ingress policy allows it to reach env pods on port 22 (default `tailscale`).                                                   |
-| `egress.cidrAllows`   | list   | Fixed CIDR ranges a dev pod may reach, as strings. For example `100.64.0.0/10`, the tailscale CGNAT.                                                                                         |
-| `egress.podAllows`    | list   | In-cluster targets a dev pod may reach. Each entry is `namespace`, `podSelector` (a label map), and `port`. Omit `port` to allow all ports. For example the litellm proxy.                   |
+| Name                  | Type   | Description                                                                                                                                                                                                             |
+| --------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dev`                 | string | Developer identity. It is the namespace label `herdr.dev/owner` and the prefix the CLI force-adds to every pen name (`<dev>-<env>`). The namespace itself is named `<namespacePrefix><dev>`.                            |
+| `namespacePrefix`     | string | Prefix of the namespace name, default `env-` (namespace `env-tobias` for dev `tobias`). The composed name must be RFC 1123 and 63 characters or fewer.                                                                  |
+| `authorizedKeys`      | list   | ssh public keys, written to the `authorized_keys` Secret key of `herdr-dev-<namespace>`.                                                                                                                                |
+| `operator.namespace`  | string | Namespace of the cluster-wide operator that the chart grants per-namespace write access to (default `pipen`).                                                                                                           |
+| `tailscale.namespace` | string | Namespace where the tailscale-operator L3 ssh proxy runs. The ingress policy allows it to reach env pods on port 22 (default `tailscale`).                                                                              |
+| `egress.cidrAllows`   | list   | Fixed CIDR ranges a dev pod may reach, as strings. For example `100.64.0.0/10`, the tailscale CGNAT.                                                                                                                    |
+| `egress.podAllows`    | list   | In-cluster targets a dev pod may reach. Each entry is `namespace`, `podSelector` (a label map), and `port`. Omit `port` to allow all ports. For example the litellm proxy.                                              |
+| `ingress.podAllows`   | list   | In-cluster sources that may reach a dev pod. Each entry is `namespace`, `podSelector` (a label map), and `port`. Omit `port` to allow all ports. For example a tailscale per-Service proxy pod on a port other than 22. |
 
 ## Objects
 
@@ -50,7 +51,9 @@ Or from a repo checkout: `helm install <dev> charts/dev-namespace ...`.
   allows from `egress.cidrAllows` and `egress.podAllows`
 - `NetworkPolicy` `default-deny-ingress`: denies all ingress. It then allows
   the tailscale ssh proxy (from `tailscale.namespace`, pod label
-  `tailscale.com/parent-resource-type=ingress_service`) on port 22
+  `tailscale.com/parent-resource-type` equal to `ingress_service`, the
+  Ingress-object proxy, or `svc`, the per-Service proxy) on port 22, plus
+  the sources from `ingress.podAllows`
 
 The per-developer litellm key and the rendered pi configuration live in a
 ConfigMap that your cluster tooling creates. See the repo README (Admins).
@@ -150,7 +153,38 @@ before the bump:
 - With kube-proxy in iptables mode and `masqueradeAll: true`, check the
   tailscale proxy source address against the ingress rule (see the 0.4.0
   note). The connection can arrive at the env pod from the node IP
+- If your cluster exposes env Services directly (a ProxyClass or the
+  `tailscale.com/expose` annotation), the tailnet ssh proxy is a
+  per-Service proxy pod, not the Ingress-object proxy. The 0.6.0 ingress
+  rule only matched the Ingress-object proxy, so tailnet ssh times out on
+  0.6.0 and no chart value can fix it. Upgrade to 0.6.1
 - Check the CNI applies policy to Service traffic. kindnet checks
   pod-to-pod traffic, but it applies no policy to traffic addressed to a
   Service (ClusterIP). Run Calico or Cilium when you need egress to
   in-cluster Services denied
+
+## 0.6.1 allows the per-Service tailscale proxy and adds `ingress.podAllows`
+
+The 0.6.0 ingress allow matched only the Ingress-object proxy (pod label
+`tailscale.com/parent-resource-type=ingress_service`). Clusters that
+expose env Services directly (a ProxyClass or the `tailscale.com/expose`
+annotation) get per-Service proxy pods labeled
+`tailscale.com/parent-resource-type=svc`. The 0.6.0 rule blocked them,
+and tailnet ssh timed out with no chart value to change that.
+
+The ingress rule now matches both proxy shapes on port 22. Both are
+single-replica proxy StatefulSets in the operator namespace, the same
+trust domain. The new `ingress.podAllows` value mirrors
+`egress.podAllows`: each entry is a `namespace`, a `podSelector`, and an
+optional `port`. Use it for a proxy shape or port the default rule does
+not cover, for example a per-Service proxy that serves an env Service
+port other than 22.
+
+The kind e2e job does not run the tailscale operator, so it cannot catch
+proxy label drift. After a tailscale-operator upgrade, check the proxy
+pod labels on your cluster against this rule:
+
+```sh
+kubectl -n <tailscale namespace> get pods \
+  -l tailscale.com/parent-resource-type --show-labels
+```

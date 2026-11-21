@@ -42,3 +42,17 @@ egress:
   #       app: litellm
   #     port: 4000
   podAllows: []
+
+# Extra ingress this dev namespace may receive, beyond the tailscale ssh
+# proxy that is always allowed on port 22. Without these, no other
+# namespace can reach a dev pod.
+ingress:
+  # Sources by namespace, pod selector and port. Each entry needs
+  # namespace and podSelector (a label map); port is optional (omit it to
+  # allow all ports from those pods). For example a tailscale per-Service
+  # proxy pod that serves an env Service port other than 22:
+  #   - namespace: tailscale
+  #     podSelector:
+  #       tailscale.com/parent-resource-type: svc
+  #     port: 443
+  podAllows: []

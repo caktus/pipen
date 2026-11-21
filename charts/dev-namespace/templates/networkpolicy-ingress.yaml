@@ -1,9 +1,13 @@
-# Default-deny ingress for every pod in this dev namespace, with one
-# exception: the tailscale-operator L3 proxy. The proxy is a single-replica
-# StatefulSet that lives in the tailscale operator namespace, not here, and
-# it is the only in-cluster source that may reach an env pod. It is matched
-# by the operator namespace and the proxy pod label
-# tailscale.com/parent-resource-type=ingress_service, on port 22.
+# Default-deny ingress for every pod in this dev namespace, with the
+# exceptions: the tailscale-operator L3 proxy, and the extra ingress
+# allows set via .Values.ingress (see the chart README).
+# The tailscale operator runs one single-replica proxy StatefulSet per
+# exposed-resource shape, in the operator namespace, not here. Both
+# shapes are in the same trust domain and are allowed on port 22:
+#   - Ingress-object path (a tailscale Ingress resource):
+#     tailscale.com/parent-resource-type=ingress_service
+#   - per-Service path (a Service via ProxyClass or the
+#     tailscale.com/expose annotation): tailscale.com/parent-resource-type=svc
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -17,16 +21,37 @@ spec:
   policyTypes:
     - Ingress
   ingress:
-    # policyTypes: Ingress default-denies all ingress; the rule below is
-    # the only exception
-    # tailscale ssh proxy, from the operator namespace
+    # policyTypes: Ingress default-denies all ingress; the rules below
+    # are the only exceptions
+    # tailscale ssh proxy, from the operator namespace. Matches both
+    # proxy shapes: the Ingress-object path (ingress_service) and the
+    # per-Service path (svc)
     - from:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: {{ .Values.tailscale.namespace | quote }}
           podSelector:
-            matchLabels:
-              tailscale.com/parent-resource-type: ingress_service
+            matchExpressions:
+              - key: tailscale.com/parent-resource-type
+                operator: In
+                values:
+                  - ingress_service
+                  - svc
       ports:
         - protocol: TCP
           port: 22
+    {{- range .Values.ingress.podAllows }}
+    # an extra ingress source: a namespace and pod selector, on the
+    # given port; all ports when port is omitted
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .namespace | quote }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .podSelector | nindent 16 }}
+      {{- if .port }}
+      ports:
+        - port: {{ .port }}
+      {{- end }}
+    {{- end }}
