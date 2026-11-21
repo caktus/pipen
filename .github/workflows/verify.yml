@@ -384,20 +384,22 @@ jobs:
           #  - a pod outside env-ci cannot connect to a pod in env-ci
           #  - a pod in env-ci cannot reach a Service outside env-ci
           #  - DNS (kube-dns in kube-system) still works from env-ci
+          # registry.k8s.io/busybox only mirrors up to 1.27, and that nc has
+          # no -z flag: a connect with stdin on /dev/null exits 0 on success
           kubectl -n env-ci run np-listener \
-            --image=registry.k8s.io/busybox:1.35 --restart=Never \
+            --image=registry.k8s.io/busybox:1.27 --restart=Never \
             --command -- sh -c 'while :; do nc -l -p 9090; done'
           kubectl -n default run np-client \
-            --image=registry.k8s.io/busybox:1.35 --restart=Never -- sleep 600
+            --image=registry.k8s.io/busybox:1.27 --restart=Never -- sleep 600
           kubectl -n env-ci wait --for=condition=Ready pod/np-listener --timeout=120s
           kubectl -n default wait --for=condition=Ready pod/np-client --timeout=120s
           listener_ip=$(kubectl -n env-ci get pod np-listener -o jsonpath='{.status.podIP}')
           # outside -> env pod: denied by default-deny ingress
-          kubectl -n default exec np-client -- nc -z -w 5 "$listener_ip" 9090 \
+          kubectl -n default exec np-client -- nc -w 5 "$listener_ip" 9090 </dev/null \
             && { echo "ingress leak: outside pod reached env pod" >&2; exit 1; }
           echo "outside -> env pod: denied OK"
           # env pod -> Service outside: denied by default-deny egress
-          kubectl -n env-ci exec np-listener -- nc -z -w 5 kubernetes.default.svc 443 \
+          kubectl -n env-ci exec np-listener -- nc -w 5 kubernetes.default.svc 443 </dev/null \
             && { echo "egress leak: env pod reached the kubernetes Service" >&2; exit 1; }
           echo "env pod -> kubernetes Service: denied OK"
           # DNS from env-ci must still work (the kube-dns allow rule)
