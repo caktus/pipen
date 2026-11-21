@@ -2,8 +2,8 @@
 id: PI-013
 github_issue: 13
 github_url: https://github.com/caktus/pipen/issues/13
-last_synced: "2026-11-21T01:44:01.942107+00:00"
-synced_hash: 9f158605df60378fc406ddb545f138ed6fe08ad46f08e6d95f30563fa059405f
+last_synced: "2026-11-21T02:24:37.860874+00:00"
+synced_hash: 7399be0c01a1a5dfb7735b47cc19f9e90d55aca4336dbc2fdd8074959bcdde4d
 title: Enforce the namespace lockdown and optional pen config
 type: Bug
 assignee: "@me"
@@ -28,7 +28,7 @@ A code review found that both dev namespace NetworkPolicies contain an empty rul
 ### AC
 
 - [ ] `helm template ci charts/dev-namespace --set dev=ci | grep -cE '^\s*- \{\}\s*$'` prints 0
-- [ ] In the kind e2e, a pod in another namespace cannot connect to a pod in `env-ci`. A pod in `env-ci` cannot reach a Service in another namespace. DNS lookups from `env-ci` still work.
+- [ ] In the kind e2e, a pod in another namespace cannot connect to a pod in `env-ci`, and a pod in `env-ci` cannot connect to a pod in another namespace. DNS lookups from `env-ci` still work. kindnet does not policy-check traffic addressed to a Service (ClusterIP), so the e2e proves the pod-to-pod direction; enforcing egress to in-cluster Services is a reference-cluster check on a full CNI (Calico, Cilium).
 - [ ] The `pipen-operator` Role in the dev namespace reads only the `herdr-dev-<namespace>` ConfigMap and Secret (by `resourceNames`), and the e2e pen still reaches phase Running
 - [ ] An operator unit test shows that the `dev-config` volume is optional and the pen pod does not mount a ServiceAccount token
 - [ ] In the kind e2e, a pen whose ConfigMap has no `litellm_key` and no `settings.json` reaches phase Running
