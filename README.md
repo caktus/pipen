@@ -188,7 +188,10 @@ Hard requirements (pipen does not run without them):
   than 1.22, add the static label `kubernetes.io/metadata.name=<name>` to
   every namespace a policy matches: `kube-system` (DNS), the tailscale
   operator namespace, and each `egress.podAllows` target namespace. Keep
-  `matchLabels` in the dev-namespace templates
+  `matchLabels` in the dev-namespace templates. kindnet checks pod-to-pod
+  traffic, but it applies no policy to traffic addressed to a Service
+  (ClusterIP). Run Calico or Cilium when you need egress to in-cluster
+  Services denied
 - **kube-proxy check**: with iptables mode and `masqueradeAll: true`, the
   tailscale proxy's connections may arrive at the pen pod from the node IP
   instead of the proxy pod. If so, change the ingress allow to an ipBlock

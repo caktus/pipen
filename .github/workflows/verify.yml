@@ -382,26 +382,34 @@ jobs:
           # (policy podSelector {} covers every pod in the namespace, probe
           # pods included):
           #  - a pod outside env-ci cannot connect to a pod in env-ci
-          #  - a pod in env-ci cannot reach a Service outside env-ci
+          #  - a pod in env-ci cannot connect to a pod outside env-ci
           #  - DNS (kube-dns in kube-system) still works from env-ci
+          # kindnet (kube-network-policies) evaluates traffic per pod pair.
+          # Traffic addressed to a Service (ClusterIP) has no destination
+          # pod, and kindnet applies no policy to it, so the e2e proves the
+          # pod-to-pod direction. A full CNI (Calico, Cilium) enforces
+          # egress to in-cluster Services; that is the reference-cluster
+          # check
           # registry.k8s.io/busybox only mirrors up to 1.27, and that nc has
           # no -z flag: a connect with stdin on /dev/null exits 0 on success
           kubectl -n env-ci run np-listener \
             --image=registry.k8s.io/busybox:1.27 --restart=Never \
             --command -- sh -c 'while :; do nc -l -p 9090; done'
           kubectl -n default run np-client \
-            --image=registry.k8s.io/busybox:1.27 --restart=Never -- sleep 600
+            --image=registry.k8s.io/busybox:1.27 --restart=Never \
+            --command -- sh -c 'while :; do nc -l -p 9091; done'
           kubectl -n env-ci wait --for=condition=Ready pod/np-listener --timeout=120s
           kubectl -n default wait --for=condition=Ready pod/np-client --timeout=120s
           listener_ip=$(kubectl -n env-ci get pod np-listener -o jsonpath='{.status.podIP}')
+          client_ip=$(kubectl -n default get pod np-client -o jsonpath='{.status.podIP}')
           # outside -> env pod: denied by default-deny ingress
           kubectl -n default exec np-client -- nc -w 5 "$listener_ip" 9090 </dev/null \
             && { echo "ingress leak: outside pod reached env pod" >&2; exit 1; }
           echo "outside -> env pod: denied OK"
-          # env pod -> Service outside: denied by default-deny egress
-          kubectl -n env-ci exec np-listener -- nc -w 5 kubernetes.default.svc 443 </dev/null \
-            && { echo "egress leak: env pod reached the kubernetes Service" >&2; exit 1; }
-          echo "env pod -> kubernetes Service: denied OK"
+          # env pod -> outside pod: denied by default-deny egress
+          kubectl -n env-ci exec np-listener -- nc -w 5 "$client_ip" 9091 </dev/null \
+            && { echo "egress leak: env pod reached pod outside env-ci" >&2; exit 1; }
+          echo "env pod -> outside pod: denied OK"
           # DNS from env-ci must still work (the kube-dns allow rule)
           kubectl -n env-ci exec np-listener -- nslookup kubernetes.default >/dev/null \
             || { echo "DNS broken from env-ci" >&2; exit 1; }

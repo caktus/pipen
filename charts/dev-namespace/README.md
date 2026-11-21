@@ -150,3 +150,7 @@ before the bump:
 - With kube-proxy in iptables mode and `masqueradeAll: true`, check the
   tailscale proxy source address against the ingress rule (see the 0.4.0
   note). The connection can arrive at the env pod from the node IP
+- Check the CNI applies policy to Service traffic. kindnet checks
+  pod-to-pod traffic, but it applies no policy to traffic addressed to a
+  Service (ClusterIP). Run Calico or Cilium when you need egress to
+  in-cluster Services denied
