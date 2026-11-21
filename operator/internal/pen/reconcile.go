@@ -230,13 +230,20 @@ func (r *Reconciler) ensurePod(ctx context.Context, pen *v1alpha1.Pen, image str
 		hostname = pen.Name + "." + cfg.TailnetDomain
 	}
 	privileged := true
+	// pens run no cluster-credentialed client, so the pod mounts no
+	// ServiceAccount token.
+	automountToken := false
+	// the dev ConfigMap keys are optional: a pen whose ConfigMap carries
+	// none of them still boots.
+	devConfigOptional := true
 	secKey := "herdr-dev-" + pen.Namespace
 	cmKey := "herdr-dev-" + pen.Namespace
 	nodeSelector := cfg.NodeSelector
 	spec := corev1.PodSpec{
-		RuntimeClassName: runtimeClassPtr(cfg.RuntimeClass),
-		RestartPolicy:    corev1.RestartPolicyAlways,
-		NodeSelector:     nodeSelector,
+		RuntimeClassName:             runtimeClassPtr(cfg.RuntimeClass),
+		RestartPolicy:                corev1.RestartPolicyAlways,
+		NodeSelector:                 nodeSelector,
+		AutomountServiceAccountToken: &automountToken,
 		Containers: []corev1.Container{{
 			Name:            "env",
 			Image:           image,
@@ -276,6 +283,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, pen *v1alpha1.Pen, image str
 				VolumeSource: corev1.VolumeSource{
 					ConfigMap: &corev1.ConfigMapVolumeSource{
 						LocalObjectReference: corev1.LocalObjectReference{Name: cmKey},
+						Optional:             &devConfigOptional,
 						Items: []corev1.KeyToPath{
 							{Key: "models.json", Path: "models.json"},
 							{Key: "settings.json", Path: "settings.json"},
