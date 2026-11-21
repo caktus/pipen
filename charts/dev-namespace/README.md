@@ -39,8 +39,8 @@ Or from a repo checkout: `helm install <dev> charts/dev-namespace ...`.
   create, no pvc delete)
 - `Role`/`RoleBinding` `pipen-operator` (in the same namespace): the
   per-namespace writes for the operator's ServiceAccount (pods, services, pvc
-  create, pens/status update, configmap/secret get, plus reads on all of
-  them)
+  create, pens/status update, configmap/secret get limited to the
+  `herdr-dev-<namespace>` objects, plus reads on all of them)
 - `Secret` `deploy-token` (`kubernetes.io/service-account-token`); the token
   controller fills `data.token` after a delay
 - `Secret` `herdr-dev-<namespace>`: the ssh public keys
@@ -124,3 +124,31 @@ change a rule:
 - If the kata guest talks to the Mayastor home-PVC gateway through the pod
   network, default-deny egress blocks storage. Add an allow for the gateway
   (namespace/selector or CIDR) under `egress.podAllows` or `egress.cidrAllows`.
+
+## 0.5.1 values comment only
+
+The `egress.podAllows` comment notes that the same rule pattern serves any
+in-cluster model endpoint, not just the litellm proxy. No rendered object
+changed.
+
+## 0.6.0 closes the default-deny loophole
+
+The two NetworkPolicies carried an empty rule (`- {}`). An empty rule
+matches everything, so every env pod reached the whole cluster, and the
+whole cluster reached every env pod. This release deletes the empty rules.
+`policyTypes` alone default-denies, so the policies now block every
+traffic direction that is not on an allow rule. The operator Role narrows
+its configmap and secret `get` to the `herdr-dev-<namespace>` objects.
+
+The upgrade turns on isolation for the first time. Run these checks
+before the bump:
+
+- Set `egress.podAllows` for the model endpoint (the litellm proxy pod,
+  or the self-provider target). Without it, a pen with litellm-backed
+  models loses model access on upgrade
+- If the kata guest talks to the Mayastor home-PVC gateway through the pod
+  network, allow the gateway under `egress.podAllows` or
+  `egress.cidrAllows` (see the 0.4.0 note)
+- With kube-proxy in iptables mode and `masqueradeAll: true`, check the
+  tailscale proxy source address against the ingress rule (see the 0.4.0
+  note). The connection can arrive at the env pod from the node IP

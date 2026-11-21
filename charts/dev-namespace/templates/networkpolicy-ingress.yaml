@@ -17,8 +17,8 @@ spec:
   policyTypes:
     - Ingress
   ingress:
-    # deny all ingress by default; the rule below is the only exception
-    - {}
+    # policyTypes: Ingress default-denies all ingress; the rule below is
+    # the only exception
     # tailscale ssh proxy, from the operator namespace
     - from:
         - namespaceSelector:

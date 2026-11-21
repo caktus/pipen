@@ -23,9 +23,16 @@ rules:
   - apiGroups: [""]
     resources: [persistentvolumeclaims]
     verbs: [create, get, list, watch]
+  # the get rules are scoped to the herdr-dev-<namespace> objects by
+  # resourceNames: the operator's existence probe (a direct APIReader) reads
+  # exactly those two objects and nothing else
   - apiGroups: [""]
     resources: [configmaps]
     verbs: [get]
+    resourceNames:
+      - 'herdr-dev-{{ include "dev-namespace.name" . }}'
   - apiGroups: [""]
     resources: [secrets]
     verbs: [get]
+    resourceNames:
+      - 'herdr-dev-{{ include "dev-namespace.name" . }}'

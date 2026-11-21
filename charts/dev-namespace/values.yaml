@@ -11,8 +11,8 @@ dev: ""
 namespacePrefix: env-
 
 # OpenSSH public keys authorized on each env's key-only sshd. Rendered into
-# Secret herdr-dev-<namespace> (key authorized_keys), which the herdr CLI's
-# pod template projects into every env.
+# Secret herdr-dev-<namespace> (key authorized_keys), which the operator's
+# pod template projects into every pen.
 authorizedKeys: []
 
 # Where the cluster-wide pipen-operator lives (pipen-operator chart). Its

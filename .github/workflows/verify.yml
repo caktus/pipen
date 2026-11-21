@@ -204,7 +204,9 @@ jobs:
       - name: Create the dev bootstrap ConfigMap
         run: |
           # the dev-namespace README hands this step to the admin; the e2e
-          # exercises the litellm-backed path and carries all three keys
+          # exercises the optional-config path: one key only (models.json),
+          # so the pen pod mounts a partial ConfigMap. The pen runs the
+          # pause image; the dev image never runs in the e2e
           cat <<'EOF' | kubectl apply -f -
           apiVersion: v1
           kind: ConfigMap
@@ -213,8 +215,6 @@ jobs:
             namespace: env-ci
           data:
             models.json: "[]"
-            settings.json: "{}"
-            litellm_key: "sk-e2e"
           EOF
       - name: The operator Deployment is ready
         run: kubectl -n pipen rollout status deploy/pipen-operator --timeout=180s
@@ -290,6 +290,37 @@ jobs:
           kubectl -n env-ci get pod env-smoke
       - name: The pod is ready
         run: kubectl -n env-ci wait --for=condition=Ready pod/env-smoke --timeout=180s
+      - name: The lockdown blocks cross-namespace traffic
+        run: |
+          # the 0.6.0 NetworkPolicies turn on isolation for the first time,
+          # so the e2e proves all three directions with probe pods
+          # (policy podSelector {} covers every pod in the namespace, probe
+          # pods included):
+          #  - a pod outside env-ci cannot connect to a pod in env-ci
+          #  - a pod in env-ci cannot reach a Service outside env-ci
+          #  - DNS (kube-dns in kube-system) still works from env-ci
+          kubectl -n env-ci run np-listener \
+            --image=registry.k8s.io/busybox:1.35 --restart=Never \
+            --command -- sh -c 'while :; do nc -l -p 9090; done'
+          kubectl -n default run np-client \
+            --image=registry.k8s.io/busybox:1.35 --restart=Never -- sleep 600
+          kubectl -n env-ci wait --for=condition=Ready pod/np-listener --timeout=120s
+          kubectl -n default wait --for=condition=Ready pod/np-client --timeout=120s
+          listener_ip=$(kubectl -n env-ci get pod np-listener -o jsonpath='{.status.podIP}')
+          # outside -> env pod: denied by default-deny ingress
+          kubectl -n default exec np-client -- nc -z -w 5 "$listener_ip" 9090 \
+            && { echo "ingress leak: outside pod reached env pod" >&2; exit 1; }
+          echo "outside -> env pod: denied OK"
+          # env pod -> Service outside: denied by default-deny egress
+          kubectl -n env-ci exec np-listener -- nc -z -w 5 kubernetes.default.svc 443 \
+            && { echo "egress leak: env pod reached the kubernetes Service" >&2; exit 1; }
+          echo "env pod -> kubernetes Service: denied OK"
+          # DNS from env-ci must still work (the kube-dns allow rule)
+          kubectl -n env-ci exec np-listener -- nslookup kubernetes.default >/dev/null \
+            || { echo "DNS broken from env-ci" >&2; exit 1; }
+          echo "DNS from env-ci OK"
+          kubectl -n env-ci delete pod np-listener --wait=false
+          kubectl -n default delete pod np-client --wait=false
       - name: Ready via the patched loadBalancer ingress
         run: |
           # kind runs no Tailscale operator, so the tailnet hostname is
