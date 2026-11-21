@@ -108,10 +108,8 @@ the prefixed namespace and keep the home PVCs in it.
 The two NetworkPolicies render with the namespace install. They need a CNI
 that enforces NetworkPolicy (Calico, Cilium, or kindnet). The kube-dns and
 namespace allows use the automatic namespace label
-`kubernetes.io/metadata.name`, which is GA in kubernetes 1.31. On an older
-cluster, replace that label with `matchNames: [kube-system]`. For the
-tailscale rule use `matchNames` with the operator namespace name. Check
-this before rollout.
+`kubernetes.io/metadata.name`. The version floor and the older-cluster
+fallback live in the repo README (Admins, Prerequisites).
 
 Two things must be checked on the cluster before rollout, because both can
 change a rule:

@@ -38,8 +38,8 @@ jobs:
       - name: Chart changes must bump the chart version
         run: |
           # the Chart.yaml version bump is the release trigger for the
-          # chart publish workflow, so a change that touches a chart
-          # without a bump would change the installed chart silently
+          # chart publish workflow, so a chart change without a bump
+          # changes the installed chart silently
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             base="${{ github.event.pull_request.base.sha }}"
           else
