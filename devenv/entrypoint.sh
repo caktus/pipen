@@ -53,25 +53,42 @@ install -d -m 700 -o "${DEV_USER}" -g "${DEV_USER}" "${DEV_HOME}/.ssh"
 install -m 600 -o "${DEV_USER}" -g "${DEV_USER}" \
     /run/herdr/secret/authorized_keys "${DEV_HOME}/.ssh/authorized_keys"
 
-# --- pi.dev config from the projected ConfigMap (0600: models.json carries
-# --- the model provider key). Each file is optional, see the header:
-# --- a pen without any of them boots and the developer signs in by hand.
-if [ -e /run/herdr/config/models.json ]; then
-    install -d -m 700 -o "${DEV_USER}" -g "${DEV_USER}" "${DEV_HOME}/.pi/agent"
-    install -m 600 -o "${DEV_USER}" -g "${DEV_USER}" \
-        /run/herdr/config/models.json "${DEV_HOME}/.pi/agent/models.json"
-fi
-if [ -e /run/herdr/config/settings.json ]; then
-    install -d -m 700 -o "${DEV_USER}" -g "${DEV_USER}" "${DEV_HOME}/.pi/agent"
-    install -m 600 -o "${DEV_USER}" -g "${DEV_USER}" \
-        /run/herdr/config/settings.json "${DEV_HOME}/.pi/agent/settings.json"
-fi
-
-# --- model provider key (0600), same placement as the dev-VM flow
-if [ -e /run/herdr/config/litellm_key ]; then
-    install -m 600 -o "${DEV_USER}" -g "${DEV_USER}" \
-        /run/herdr/config/litellm_key "${DEV_HOME}/.litellm_key"
-fi
+# --- pi.dev config from the projected ConfigMap -----------------------------
+# Each key is optional, and a zero-byte entry reads as absent: a pen whose
+# ConfigMap carries none of them still boots, and the developer signs in to
+# their own model-provider account inside. Placed files are 0600 (models.json
+# carries the model provider key) and leave a sha256 marker under
+# /home/.herdr/projected. A later boot whose ConfigMap dropped the key
+# removes the placed copy while it still matches the marker; a file the
+# developer wrote or edited has a different hash (or no marker) and stays.
+MARKER_DIR="/home/.herdr/projected"
+install -d -m 700 "${MARKER_DIR}"
+for name in models.json settings.json litellm_key; do
+    src="/run/herdr/config/${name}"
+    marker="${MARKER_DIR}/${name}.sha256"
+    if [ "${name}" = "litellm_key" ]; then
+        dest="${DEV_HOME}/.litellm_key"   # same placement as the dev-VM flow
+    else
+        dest="${DEV_HOME}/.pi/agent/${name}"
+    fi
+    if [ -s "${src}" ]; then
+        if [ "${name}" != "litellm_key" ]; then
+            # the .pi/agent dir appears only when a pi config file lands
+            install -d -m 700 -o "${DEV_USER}" -g "${DEV_USER}" "${DEV_HOME}/.pi/agent"
+        fi
+        install -m 600 -o "${DEV_USER}" -g "${DEV_USER}" "${src}" "${dest}"
+        printf '%s\n' "$(sha256sum "${src}" | cut -d' ' -f1)" > "${marker}"
+        chown "${DEV_USER}:${DEV_USER}" "${marker}"
+    elif [ -e "${marker}" ]; then
+        # the key is absent or zero-byte: drop the placed copy only while
+        # it still matches the marker (the developer never touched it)
+        if [ -f "${dest}" ] && \
+            [ "$(sha256sum "${dest}" | cut -d' ' -f1)" = "$(cat "${marker}")" ]; then
+            rm -f "${dest}"
+        fi
+        rm -f "${marker}"
+    fi
+done
 
 # direnv hook in the dev user's .bashrc (dev-VM convention; idempotent).
 # Plain shell — not `bash -c '…' -u HOME=…`: with -c the operands after the

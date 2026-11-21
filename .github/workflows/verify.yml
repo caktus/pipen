@@ -145,6 +145,82 @@ jobs:
           load: true
           cache-from: type=gha,scope=herdr-image
           cache-to: type=gha,scope=herdr-image,mode=max
+      - name: Boot probe with an empty config dir
+        run: |
+          # the entrypoint must boot with no model config at all: sshd
+          # runs, the dev user exists, and no config file is placed
+          work="$RUNNER_TEMP/probe1"
+          mkdir -p "$work/secret" "$work/config"
+          printf 'ssh-ed25519 AAAACIKEY probe\n' > "$work/secret/authorized_keys"
+          docker run -d --name herdr-probe1 --privileged \
+            -e DEV_USER=probe \
+            -v "$work/secret":/run/herdr/secret \
+            -v "$work/config":/run/herdr/config \
+            -v herdr-probe1-home:/home \
+            pipen-herdr-dev:ci
+          for i in $(seq 1 60); do
+            docker exec herdr-probe1 pgrep -x sshd >/dev/null 2>&1 && break
+            sleep 2
+          done
+          docker exec herdr-probe1 pgrep -x sshd \
+            || { docker logs herdr-probe1 >&2; echo "sshd not running" >&2; exit 1; }
+          docker exec herdr-probe1 id probe >/dev/null
+          docker exec herdr-probe1 test ! -e /home/probe/.pi/agent \
+            || { echo "~/.pi/agent exists with an empty config" >&2; exit 1; }
+          docker exec herdr-probe1 test ! -e /home/probe/.litellm_key \
+            || { echo "~/.litellm_key exists with an empty config" >&2; exit 1; }
+          echo "empty-config boot OK"
+          docker stop herdr-probe1 >/dev/null
+      - name: Boot probe with a dropped key
+        run: |
+          # two boots on one /home volume. Boot 1 carries models.json and
+          # litellm_key. The developer then writes a settings.json by hand.
+          # Boot 2 carries no keys: the placed files and their markers go,
+          # the developer's file stays
+          work="$RUNNER_TEMP/probe2"
+          mkdir -p "$work/secret" "$work/config-full" "$work/config-empty"
+          printf 'ssh-ed25519 AAAACIKEY probe\n' > "$work/secret/authorized_keys"
+          printf '[]' > "$work/config-full/models.json"
+          printf 'sk-probe' > "$work/config-full/litellm_key"
+          docker run -d --name herdr-probe2a --privileged \
+            -e DEV_USER=probe \
+            -v "$work/secret":/run/herdr/secret \
+            -v "$work/config-full":/run/herdr/config \
+            -v herdr-probe2-home:/home \
+            pipen-herdr-dev:ci
+          for i in $(seq 1 60); do
+            docker exec herdr-probe2a pgrep -x sshd >/dev/null 2>&1 && break
+            sleep 2
+          done
+          docker exec herdr-probe2a pgrep -x sshd \
+            || { docker logs herdr-probe2a >&2; echo "boot 1: sshd not running" >&2; exit 1; }
+          # the developer writes a settings.json by hand on the /home volume
+          docker run --rm --entrypoint sh -v herdr-probe2-home:/home pipen-herdr-dev:ci \
+            -c 'mkdir -p /home/probe/.pi/agent && printf dev > /home/probe/.pi/agent/settings.json'
+          docker stop herdr-probe2a >/dev/null
+          docker run -d --name herdr-probe2b --privileged \
+            -e DEV_USER=probe \
+            -v "$work/secret":/run/herdr/secret \
+            -v "$work/config-empty":/run/herdr/config \
+            -v herdr-probe2-home:/home \
+            pipen-herdr-dev:ci
+          for i in $(seq 1 60); do
+            docker exec herdr-probe2b pgrep -x sshd >/dev/null 2>&1 && break
+            sleep 2
+          done
+          docker exec herdr-probe2b pgrep -x sshd \
+            || { docker logs herdr-probe2b >&2; echo "boot 2: sshd not running" >&2; exit 1; }
+          docker exec herdr-probe2b test ! -e /home/probe/.pi/agent/models.json \
+            || { echo "placed models.json survived a key drop" >&2; exit 1; }
+          docker exec herdr-probe2b test ! -e /home/probe/.litellm_key \
+            || { echo "placed litellm_key survived a key drop" >&2; exit 1; }
+          markers=$(docker exec herdr-probe2b sh -c 'ls /home/.herdr/projected/*.sha256 2>/dev/null || true')
+          [ -z "$markers" ] \
+            || { echo "projected markers survived a key drop: $markers" >&2; exit 1; }
+          [ "$(docker exec herdr-probe2b cat /home/probe/.pi/agent/settings.json)" = "dev" ] \
+            || { echo "developer settings.json was touched" >&2; exit 1; }
+          echo "dropped-key boot OK"
+          docker stop herdr-probe2b >/dev/null
       - name: Build the operator image
         uses: docker/build-push-action@v6
         with:
