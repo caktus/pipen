@@ -2,13 +2,13 @@
 id: PI-012
 github_issue: 12
 github_url: https://github.com/caktus/pipen/issues/12
-last_synced: '2026-11-21T00:51:10.422212+00:00'
+last_synced: "2026-11-21T00:51:10.422212+00:00"
 synced_hash: 8f9e0bbdea6b7d55f995ee1f02013f2710bf9f680faebdd137c64644a996b394
 title: Parameterize infra assumptions and document prerequisites
 type: Task
-assignee: '@me'
+assignee: "@me"
 labels:
-- phase/done
+  - phase/done
 context:
   relates_to: []
 ---
