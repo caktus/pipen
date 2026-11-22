@@ -230,6 +230,40 @@ jobs:
             || { echo "developer settings.json was touched" >&2; exit 1; }
           echo "dropped-key boot OK"
           docker stop herdr-probe2b >/dev/null
+      - name: Boot probe with a key ssh
+        run: |
+          # the first two probes only check the image with docker exec. This
+          # one drives a real key ssh: generate a key on the runner, project
+          # the public key, publish sshd's port, and confirm the login lands
+          # in the dev home
+          work="$RUNNER_TEMP/probe3"
+          mkdir -p "$work/secret" "$work/config"
+          ssh-keygen -q -t ed25519 -N '' -f "$work/id_probe"
+          cp "$work/id_probe.pub" "$work/secret/authorized_keys"
+          docker run -d --name herdr-probe3 --privileged \
+            -e DEV_USER=probe \
+            -p 127.0.0.1:2222:22 \
+            -v "$work/secret":/run/herdr/secret \
+            -v "$work/config":/run/herdr/config \
+            -v herdr-probe3-home:/home \
+            pipen-herdr-dev:ci
+          for i in $(seq 1 60); do
+            docker exec herdr-probe3 pgrep -x sshd >/dev/null 2>&1 && break
+            sleep 2
+          done
+          docker exec herdr-probe3 pgrep -x sshd \
+            || { docker logs herdr-probe3 >&2; echo "sshd not running" >&2; exit 1; }
+          if ! home="$(ssh -i "$work/id_probe" -p 2222 \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -o BatchMode=yes probe@127.0.0.1 'echo "$HOME"')"; then
+            docker logs herdr-probe3 >&2
+            echo "key ssh as probe failed" >&2
+            exit 1
+          fi
+          [ "$home" = "/home/probe" ] \
+            || { echo "key ssh landed in $home, want /home/probe" >&2; exit 1; }
+          echo "key ssh OK: landed in $home"
+          docker stop herdr-probe3 >/dev/null
       - name: Build the operator image
         uses: docker/build-push-action@v6
         with:
@@ -375,6 +409,14 @@ jobs:
           kubectl -n env-ci get pod env-smoke
       - name: The pod is ready
         run: kubectl -n env-ci wait --for=condition=Ready pod/env-smoke --timeout=180s
+      - name: The pod spec sets DEV_USER to the dev name
+        run: |
+          # the operator sets DEV_USER to the herdr.dev/owner label value
+          # (the bare dev name), not the namespace name env-ci
+          user="$(kubectl -n env-ci get pod env-smoke \
+            -o jsonpath='{.spec.containers[0].env[?(@.name=="DEV_USER")].value}')"
+          [ "$user" = "ci" ] \
+            || { echo "DEV_USER = $user, want ci" >&2; exit 1; }
       - name: The lockdown blocks cross-namespace traffic
         run: |
           # the 0.6.0 NetworkPolicies turn on isolation for the first time,

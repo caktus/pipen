@@ -42,3 +42,15 @@ Or from a repo checkout: `helm install operator charts/pipen-operator ...`.
 | `config.imagePullPolicy`    | string | Pod image pull policy.                                                                                                            |
 | `config.loadBalancerClass`  | string | `loadBalancerClass` for pen Services (the Tailscale operator).                                                                    |
 | `config.runtimeClass`       | string | Runtime class for env pods (`kata`). Empty means no runtime class, for clusters that run no kata runtime.                         |
+
+## Rollout
+
+The operator creates the pen pod once and never updates it (create-or-
+leave). After an operator update that changes the pod spec (for example a
+change to the `DEV_USER` env), each env picks up the new value only after a
+manual pod delete: `kubectl -n <namespace> delete pod env-<pen>`. The
+operator recreates the pod on the next reconcile, and no home data is
+migrated (the renamed user starts from an empty home). Any pod recreation,
+not just the manual delete, for example a node drain or eviction, recreates
+the pod with the current operator's `DEV_USER` and switches the guest user
+the same way.

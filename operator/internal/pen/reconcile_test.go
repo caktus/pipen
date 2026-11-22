@@ -160,6 +160,30 @@ func TestUnprovisionedNamespaceFails(t *testing.T) {
 	}
 }
 
+// A present-but-empty herdr.dev/owner label is not provisioned: the guest
+// user would be empty and the entrypoint would crash on ${DEV_USER:?}, so
+// the pen fails and no pod is created.
+func TestEmptyOwnerLabelFails(t *testing.T) {
+	ns := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: devNS, Labels: map[string]string{ownerLabelKey: ""}},
+	}
+	c := newClient(t, ns, newPen())
+	res := reconcileOnce(t, c)
+	p := getPen(t, c)
+	if p.Status.Phase != v1alpha1.PhaseFailed {
+		t.Errorf("phase = %q, want Failed", p.Status.Phase)
+	}
+	if !strings.Contains(p.Status.Message, "empty herdr.dev/owner label") {
+		t.Errorf("message = %q, want 'empty herdr.dev/owner label'", p.Status.Message)
+	}
+	if res.RequeueAfter != 0 {
+		t.Errorf("RequeueAfter = %v, want 0 (permanent failure)", res.RequeueAfter)
+	}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, &corev1.Pod{}); err == nil {
+		t.Error("pod created, want none")
+	}
+}
+
 func TestMissingDevConfigMapPends(t *testing.T) {
 	sec := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "herdr-dev-" + devNS, Namespace: devNS},
@@ -440,8 +464,8 @@ func TestReconcilePrefixedNamespace(t *testing.T) {
 	for _, e := range pod.Spec.Containers[0].Env {
 		envs[e.Name] = e.Value
 	}
-	if envs["DEV_USER"] != ns {
-		t.Errorf("DEV_USER = %q, want the namespace name %q", envs["DEV_USER"], ns)
+	if envs["DEV_USER"] != devNS {
+		t.Errorf("DEV_USER = %q, want the label value %q (not the namespace name %q)", envs["DEV_USER"], devNS, ns)
 	}
 	secVol := ""
 	cmVol := ""

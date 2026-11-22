@@ -70,8 +70,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 }
 
 func (r *Reconciler) reconcilePen(ctx context.Context, pen *v1alpha1.Pen) (ctrl.Result, error) {
-	if !r.namespaceProvisioned(ctx, pen.Namespace) {
-		return r.fail(ctx, pen, "namespace not provisioned")
+	devUser, reason := r.namespaceProvisioned(ctx, pen.Namespace)
+	if reason != "" {
+		return r.fail(ctx, pen, reason)
 	}
 	devNS := pen.Namespace
 	if !r.objectExists(ctx, types.NamespacedName{Name: "herdr-dev-" + devNS, Namespace: devNS}, &corev1.ConfigMap{}) {
@@ -112,7 +113,7 @@ func (r *Reconciler) reconcilePen(ctx context.Context, pen *v1alpha1.Pen) (ctrl.
 		corev1.ResourceCPU:    cpuQty,
 		corev1.ResourceMemory: memQty,
 	}
-	if err := r.ensurePod(ctx, pen, image, res, cfg); err != nil {
+	if err := r.ensurePod(ctx, pen, image, devUser, res, cfg); err != nil {
 		return r.fail(ctx, pen, err.Error())
 	}
 
@@ -133,13 +134,22 @@ func (r *Reconciler) reconcilePen(ctx context.Context, pen *v1alpha1.Pen) (ctrl.
 	return r.status(ctx, pen, v1alpha1.PhaseReady, true, hostname, node, "ready")
 }
 
-func (r *Reconciler) namespaceProvisioned(ctx context.Context, ns string) bool {
+// namespaceProvisioned returns the owner label value (the dev name the
+// guest unix user is named after) and a failure reason when the namespace
+// is not provisioned (missing, no owner label, or an empty owner label).
+func (r *Reconciler) namespaceProvisioned(ctx context.Context, ns string) (string, string) {
 	n := &corev1.Namespace{}
 	if err := r.Reader.Get(ctx, types.NamespacedName{Name: ns}, n); err != nil {
-		return false
+		return "", "namespace not provisioned"
 	}
-	_, ok := n.Labels[ownerLabelKey]
-	return ok
+	owner, ok := n.Labels[ownerLabelKey]
+	if !ok {
+		return "", "namespace not provisioned"
+	}
+	if owner == "" {
+		return "", fmt.Sprintf("namespace %s has an empty herdr.dev/owner label", ns)
+	}
+	return owner, ""
 }
 
 func (r *Reconciler) objectExists(ctx context.Context, key types.NamespacedName, obj client.Object) bool {
@@ -217,7 +227,7 @@ func (r *Reconciler) ensureService(ctx context.Context, pen *v1alpha1.Pen, cfg c
 	return nil
 }
 
-func (r *Reconciler) ensurePod(ctx context.Context, pen *v1alpha1.Pen, image string, res corev1.ResourceList, cfg config.Config) error {
+func (r *Reconciler) ensurePod(ctx context.Context, pen *v1alpha1.Pen, image, devUser string, res corev1.ResourceList, cfg config.Config) error {
 	key := types.NamespacedName{Name: podName(pen.Name), Namespace: pen.Namespace}
 	pod := &corev1.Pod{}
 	if err := r.Reader.Get(ctx, key, pod); err == nil {
@@ -250,7 +260,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, pen *v1alpha1.Pen, image str
 			ImagePullPolicy: pullPolicy(image, cfg.ImagePullPolicy),
 			SecurityContext: &corev1.SecurityContext{Privileged: &privileged},
 			Env: []corev1.EnvVar{
-				{Name: "DEV_USER", Value: pen.Namespace},
+				{Name: "DEV_USER", Value: devUser},
 				{Name: "TAILNET_HOSTNAME", Value: hostname},
 			},
 			Resources: corev1.ResourceRequirements{Requests: res, Limits: res},
