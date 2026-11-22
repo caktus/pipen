@@ -80,8 +80,9 @@ The naming convention the chart, the operator, and the bootstrap share:
   tooling) are both named `herdr-dev-<namespace>`. The operator waits
   for `herdr-dev-<pen namespace>` before it creates a pen, so both
   objects use the composed namespace name, not the bare `dev`.
-- The pod env `DEV_USER` is the namespace name (the convention from
-  0.3.0), so the unix user in each env is `env-tobias`, not `tobias`.
+- The pod env `DEV_USER` is the `herdr.dev/owner` label value (the bare
+  `dev`), so the unix user in each env is the dev name, for example
+  `tobias`, not the namespace name `env-tobias`.
 
 The render fails when the composed name is not RFC 1123 or is longer
 than 63 characters.
@@ -188,3 +189,9 @@ pod labels on your cluster against this rule:
 kubectl -n <tailscale namespace> get pods \
   -l tailscale.com/parent-resource-type --show-labels
 ```
+
+## 0.6.2 docs only
+
+The `DEV_USER` bullet now says the guest unix user is the dev name (the
+`herdr.dev/owner` label value), matching the operator that reads that
+label. No rendered object changed.
