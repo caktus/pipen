@@ -3,6 +3,18 @@ entries:
   dev-namespace:
   - apiVersion: v2
     appVersion: 0.1.0
+    created: "2026-11-22T19:27:43.042419543Z"
+    description: Provisions a per-developer herdr dev namespace (Namespace + ServiceAccount
+      + ns-scoped RBAC + SA token + ssh-key secret)
+    digest: a24b7c47ba4cbba75571114eecd0725c8df35eb4773ca8ff411d6284466726a9
+    home: https://github.com/caktus/pipen
+    name: dev-namespace
+    type: application
+    urls:
+    - dev-namespace-0.6.2.tgz
+    version: 0.6.2
+  - apiVersion: v2
+    appVersion: 0.1.0
     created: "2026-11-21T04:00:02.417008432Z"
     description: Provisions a per-developer herdr dev namespace (Namespace + ServiceAccount
       + ns-scoped RBAC + SA token + ssh-key secret)
@@ -87,6 +99,19 @@ entries:
     version: 0.2.0
   pipen-operator:
   - apiVersion: v2
+    appVersion: 0.2.0
+    created: "2026-11-22T19:27:43.260472046Z"
+    description: Cluster-wide pipen operator (Pen CRD + reconciler Deployment + RBAC).
+      Install exactly once per cluster; per-developer namespaces get write access
+      via the dev-namespace chart.
+    digest: 0ba35d65f668cf9665c3f4ccd165e776ac877ce089763c5cfaed3ac4294ac2f2
+    home: https://github.com/caktus/pipen
+    name: pipen-operator
+    type: application
+    urls:
+    - pipen-operator-0.3.0.tgz
+    version: 0.3.0
+  - apiVersion: v2
     appVersion: 0.1.0
     created: "2026-11-20T23:59:58.795467888Z"
     description: Cluster-wide pipen operator (Pen CRD + reconciler Deployment + RBAC).
@@ -112,4 +137,4 @@ entries:
     urls:
     - pipen-operator-0.1.0.tgz
     version: 0.1.0
-generated: "2026-11-21T04:00:02.417022834Z"
+generated: "2026-11-22T19:27:43.260510432Z"
