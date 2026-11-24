@@ -2,12 +2,12 @@
 id: PI-019
 github_issue: 19
 github_url: https://github.com/caktus/pipen/issues/19
-last_synced: "2026-11-24T19:18:40.165088+00:00"
+last_synced: "2026-11-24T19:22:39.889570+00:00"
 synced_hash: 748e30d527734911cdba46ce9fcc9032a17eb25d880e6488e028f8b44d199eed
 title: Allow resizing an existing pen
 assignee: "@me"
 labels:
-  - phase/review
+  - phase/done
 context:
   relates_to: []
 ---
