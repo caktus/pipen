@@ -714,6 +714,11 @@ func (r *Reconciler) status(ctx context.Context, pen *v1alpha1.Pen, phase v1alph
 		return ctrl.Result{RequeueAfter: requeueCreating}, nil
 	case v1alpha1.PhasePending:
 		return ctrl.Result{RequeueAfter: requeuePending}, nil
+	case v1alpha1.PhaseSuspended:
+		// Suspended is transient after a resize flip, and the operator
+		// watches no Sandbox, so a requeue observes the flip back to
+		// Running. A paused pen paces here and writes no spec.
+		return ctrl.Result{RequeueAfter: requeueCreating}, nil
 	default:
 		return ctrl.Result{}, nil
 	}

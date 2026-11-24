@@ -1247,6 +1247,54 @@ func TestReconcileTerminatingPodDoesNotFlip(t *testing.T) {
 	}
 }
 
+// TestReconcileResumeFlipsToRunningAndRequeues: the resize flip. An
+// unpaused pen, a Suspended sandbox whose pod is gone. The reconcile
+// flips the sandbox back to Running and must requeue: the operator
+// watches no Sandbox, so only a requeue lets the pen observe the flip.
+func TestReconcileResumeFlipsToRunningAndRequeues(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "1h"
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 7, 0, 0, 0, time.UTC))
+	sandbox := suspendedSandboxWithTTL("1h", &oldTime)
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	res := reconcileOnceAt(t, c, devNS, testConfig(), time.Date(2026, 11, 24, 8, 0, 0, 0, time.UTC))
+	got := getSandbox(t, c)
+	if got.Spec.OperatingMode != v1beta1.SandboxOperatingModeRunning {
+		t.Errorf("operatingMode = %q, want Running after the flip", got.Spec.OperatingMode)
+	}
+	if res.RequeueAfter != requeueCreating {
+		t.Errorf("RequeueAfter = %v, want %v so the flip is observed", res.RequeueAfter, requeueCreating)
+	}
+}
+
+// TestReconcilePausedPenInSuspendedStateDoesNotFlip: a user-paused pen in
+// the same state keeps the sandbox Suspended (the gate holds) and writes
+// no spec, but still paces at the 10s requeue.
+func TestReconcilePausedPenInSuspendedStateDoesNotFlip(t *testing.T) {
+	pen := newPen()
+	pen.Spec.Paused = true
+	pen.Spec.TTL = "1h"
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 7, 0, 0, 0, time.UTC))
+	sandbox := suspendedSandboxWithTTL("1h", &oldTime)
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	res := reconcileOnceAt(t, c, devNS, testConfig(), time.Date(2026, 11, 24, 8, 0, 0, 0, time.UTC))
+	got := getSandbox(t, c)
+	if got.Spec.OperatingMode != v1beta1.SandboxOperatingModeSuspended {
+		t.Errorf("operatingMode = %q, want Suspended (gate holds for a paused pen)", got.Spec.OperatingMode)
+	}
+	if got.ResourceVersion != sandbox.ResourceVersion {
+		t.Errorf("sandbox updated: resourceVersion %q, want %q", got.ResourceVersion, sandbox.ResourceVersion)
+	}
+	if res.RequeueAfter != requeueCreating {
+		t.Errorf("RequeueAfter = %v, want %v (a paused pen paces)", res.RequeueAfter, requeueCreating)
+	}
+	if p := getPen(t, c); p.Spec != pen.Spec {
+		t.Errorf("pen spec = %+v, want unchanged %+v", p.Spec, pen.Spec)
+	}
+}
+
 func sandboxWithTTL(ttl string, shutdownTime *metav1.Time) *v1beta1.Sandbox {
 	service := false
 	return &v1beta1.Sandbox{
