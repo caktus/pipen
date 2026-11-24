@@ -293,6 +293,14 @@ func (r *Reconciler) ensureSandbox(ctx context.Context, pen *v1alpha1.Pen, image
 	if err := r.Reader.Get(ctx, key, sandbox); err == nil {
 		// Convergence: check if spec needs update
 		needsUpdate := false
+
+		// Resume detection, before the mode below is flipped: the pen is
+		// not paused but the sandbox is still in Suspended mode, so this
+		// reconcile switches it back to Running. The stamp is one-shot per
+		// transition because the flip lands in the same update, so the
+		// next pass already sees Running mode.
+		resumed := !pen.Spec.Paused && sandbox.Spec.OperatingMode == v1beta1.SandboxOperatingModeSuspended
+
 		// 1. operatingMode mismatch with pen.Spec.Paused
 		var desiredMode v1beta1.SandboxOperatingMode
 		if pen.Spec.Paused {
@@ -305,7 +313,10 @@ func (r *Reconciler) ensureSandbox(ctx context.Context, pen *v1alpha1.Pen, image
 			needsUpdate = true
 		}
 
-		// 2. Reset the shutdown time when the TTL changes or the sandbox expires.
+		// 2. Reset the shutdown time when the TTL changes, the sandbox
+		// expires, or the sandbox resumes from Suspended mode. A resume
+		// must get a fresh TTL, or the agent-sandbox controller expires
+		// the pod right after resume when the old time is already past.
 		ttl := orDefault(pen.Spec.TTL, cfg.DefaultTTL)
 		storedTTL, hasStoredTTL := sandbox.Annotations[effectiveTTLAnnotation]
 		expired := false
@@ -318,7 +329,7 @@ func (r *Reconciler) ensureSandbox(ctx context.Context, pen *v1alpha1.Pen, image
 				break
 			}
 		}
-		if !hasStoredTTL || storedTTL != ttl || expired {
+		if !hasStoredTTL || storedTTL != ttl || expired || resumed {
 			sandbox.Spec.Lifecycle, err = newLifecycle(ttl, r.Now())
 			if err != nil {
 				return err

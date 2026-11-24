@@ -976,6 +976,57 @@ func TestReconcileExpiredSandboxResetsShutdownTimeAtFixedClock(t *testing.T) {
 	}
 }
 
+// TestReconcileResumeFromSuspendedResetsShutdownTime: pause then resume
+// with an unchanged TTL must stamp a fresh shutdownTime. Without it, the
+// agent-sandbox controller expires the pod again right after resume when
+// the old shutdownTime is already in the past.
+func TestReconcileResumeFromSuspendedResetsShutdownTime(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "1h"
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 7, 0, 0, 0, time.UTC))
+	sandbox := suspendedSandboxWithTTL("1h", &oldTime)
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, testConfig())
+	got := getSandbox(t, c)
+	if got.Spec.OperatingMode != v1beta1.SandboxOperatingModeRunning {
+		t.Errorf("operatingMode = %q, want Running", got.Spec.OperatingMode)
+	}
+	want := "2026-11-24T09:00:00Z"
+	if got.Spec.ShutdownTime.UTC().Format(time.RFC3339) != want {
+		t.Errorf("shutdownTime = %v, want fresh %s", got.Spec.ShutdownTime, want)
+	}
+}
+
+// TestReconcileResumeStampsOnce: the fresh shutdownTime from the resume
+// must survive later plain reconciles, not move on every pass (the
+// update-every-reconcile loop fixed in the TTL reset change).
+func TestReconcileResumeStampsOnce(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "1h"
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 7, 0, 0, 0, time.UTC))
+	sandbox := suspendedSandboxWithTTL("1h", &oldTime)
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceAt(t, c, devNS, testConfig(), time.Date(2026, 11, 24, 8, 0, 0, 0, time.UTC))
+	resumed := getSandbox(t, c)
+	if resumed.Spec.ShutdownTime.UTC().Format(time.RFC3339) != "2026-11-24T09:00:00Z" {
+		t.Fatalf("shutdownTime = %v, want fresh 2026-11-24T09:00:00Z", resumed.Spec.ShutdownTime)
+	}
+	for i := 1; i <= 2; i++ {
+		reconcileOnceAt(t, c, devNS, testConfig(), time.Date(2026, 11, 24, 8+i, 0, 0, 0, time.UTC))
+		got := getSandbox(t, c)
+		if !got.Spec.ShutdownTime.Equal(resumed.Spec.ShutdownTime) {
+			t.Errorf("reconcile %d: shutdownTime = %v, want unchanged %v",
+				i, got.Spec.ShutdownTime, resumed.Spec.ShutdownTime)
+		}
+		if got.ResourceVersion != resumed.ResourceVersion {
+			t.Errorf("reconcile %d: sandbox updated: resourceVersion %q, want %q",
+				i, got.ResourceVersion, resumed.ResourceVersion)
+		}
+	}
+}
+
 func getSandbox(t *testing.T, c client.Client) *v1beta1.Sandbox {
 	t.Helper()
 	sandbox := &v1beta1.Sandbox{}
@@ -983,6 +1034,14 @@ func getSandbox(t *testing.T, c client.Client) *v1beta1.Sandbox {
 		t.Fatal(err)
 	}
 	return sandbox
+}
+
+// suspendedSandboxWithTTL is a paused sandbox: operatingMode Suspended,
+// an existing shutdownTime, and the stored effective TTL annotation.
+func suspendedSandboxWithTTL(ttl string, shutdownTime *metav1.Time) *v1beta1.Sandbox {
+	sb := sandboxWithTTL(ttl, shutdownTime)
+	sb.Spec.OperatingMode = v1beta1.SandboxOperatingModeSuspended
+	return sb
 }
 
 func sandboxWithTTL(ttl string, shutdownTime *metav1.Time) *v1beta1.Sandbox {
