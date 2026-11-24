@@ -1,16 +1,19 @@
-// Package pen reconciles Pen objects: it brings the home PVC, the kata pod
-// and the tailnet-exposed Service up and reports the result on Pen status.
-// Reconcile is create-or-leave: specs of existing objects are never
-// mutated, and the PVC is never deleted by the operator.
+// Package pen reconciles Pen objects. For each Pen it ensures the home
+// PVC, the Sandbox and the tailnet-exposed Service, and reports the
+// result on Pen status. Reconcile converges the Sandbox (operatingMode,
+// shutdownTime, service) and the egress NetworkPolicy. The PVC is never
+// deleted by the operator.
 package pen
 
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -21,6 +24,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	v1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+
 	v1alpha1 "github.com/caktus/pipen/operator/api/v1alpha1"
 	"github.com/caktus/pipen/operator/internal/config"
 )
@@ -30,12 +35,15 @@ const (
 	ownerLabel = "herdr.dev/env"
 	// ownerLabelKey is the namespace label a provisioned dev namespace has.
 	ownerLabelKey = "herdr.dev/owner"
+	// effectiveTTLAnnotation records the TTL used for the current shutdown time.
+	effectiveTTLAnnotation = "pipen.dev/effective-ttl"
 
 	requeueCreating = 10 * time.Second
 	requeuePending  = 30 * time.Second
 	// requeueReady keeps a Ready pen periodically reconciled: status stays
-	// truthful (hostname changes, node moves) and a deleted pod/Service is
-	// recreated by the next pass (create-or-leave still applies).
+	// truthful (hostname changes, node moves) and a deleted Service is
+	// recreated by the next pass. The sandbox controller recreates the
+	// pod from the stored podTemplate.
 	requeueReady = 30 * time.Second
 )
 
@@ -55,6 +63,8 @@ type Reconciler struct {
 	// Config is the operator config for this reconcile pass; main reads it
 	// fresh (via the API reader) when the ConfigMap changes.
 	Config config.Config
+	// Now returns the current time. Tests use a fixed time for TTL math.
+	Now func() time.Time
 }
 
 // Reconcile brings one Pen's objects up and updates its status.
@@ -70,6 +80,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 }
 
 func (r *Reconciler) reconcilePen(ctx context.Context, pen *v1alpha1.Pen) (ctrl.Result, error) {
+	if r.Now == nil {
+		r.Now = time.Now
+	}
 	devUser, reason := r.namespaceProvisioned(ctx, pen.Namespace)
 	if reason != "" {
 		return r.fail(ctx, pen, reason)
@@ -113,25 +126,74 @@ func (r *Reconciler) reconcilePen(ctx context.Context, pen *v1alpha1.Pen) (ctrl.
 		corev1.ResourceCPU:    cpuQty,
 		corev1.ResourceMemory: memQty,
 	}
-	if err := r.ensurePod(ctx, pen, image, devUser, res, cfg); err != nil {
+	if err := r.ensureSandbox(ctx, pen, image, devUser, res, cfg); err != nil {
+		return r.fail(ctx, pen, err.Error())
+	}
+	if err := r.ensureNetworkPolicy(ctx, pen, cfg); err != nil {
 		return r.fail(ctx, pen, err.Error())
 	}
 
-	pod := &corev1.Pod{}
-	if err := r.Reader.Get(ctx, types.NamespacedName{Name: podName(pen.Name), Namespace: pen.Namespace}, pod); err != nil {
-		return r.fail(ctx, pen, fmt.Sprintf("cannot read pod: %v", err))
+	// Read sandbox status
+	sandbox := &v1beta1.Sandbox{}
+	if err := r.Reader.Get(ctx, types.NamespacedName{Name: podName(pen.Name), Namespace: pen.Namespace}, sandbox); err != nil {
+		return r.fail(ctx, pen, fmt.Sprintf("cannot read sandbox: %v", err))
 	}
-	if !podReady(pod) {
-		msg := "pod " + podName(pen.Name) + " " + podProgress(pod)
-		return r.status(ctx, pen, v1alpha1.PhaseCreating, false, "", "", msg)
+
+	// Always mirror shutdownTime to pen status so CLI can render remaining TTL
+	if sandbox.Spec.ShutdownTime != nil {
+		pen.Status.ShutdownAt = sandbox.Spec.ShutdownTime
+	} else {
+		pen.Status.ShutdownAt = nil
 	}
-	hostname := r.serviceHostname(ctx, pen)
-	if hostname == "" {
-		return r.status(ctx, pen, v1alpha1.PhaseCreating, false, "", "",
-			"pod ready, waiting for tailnet hostname on service "+pen.Name)
+
+	// Map sandbox conditions to pen status
+	for _, cond := range sandbox.Status.Conditions {
+		switch cond.Type {
+		case string(v1beta1.SandboxConditionReady):
+			if cond.Status == metav1.ConditionTrue && cond.Reason == v1beta1.SandboxReasonDependenciesReady {
+				hostname := r.serviceHostname(ctx, pen)
+				if hostname == "" {
+					return r.status(ctx, pen, v1alpha1.PhaseCreating, false, "", "",
+						"sandbox ready, waiting for tailnet hostname on service "+pen.Name)
+				}
+				// Sandbox status may have node name
+				node := sandbox.Status.NodeName
+				if node == "" {
+					// Fall back to reading pod for node (for pipen logs)
+					pod := &corev1.Pod{}
+					if err := r.Reader.Get(ctx, types.NamespacedName{Name: podName(pen.Name), Namespace: pen.Namespace}, pod); err == nil {
+						node = pod.Spec.NodeName
+					}
+				}
+				return r.status(ctx, pen, v1alpha1.PhaseReady, true, hostname, node, "ready")
+			} else if cond.Reason == v1beta1.SandboxReasonSuspended {
+				return r.status(ctx, pen, v1alpha1.PhaseSuspended, false, "", "", "suspended")
+			} else if cond.Reason == v1beta1.SandboxReasonExpired {
+				// Expired sandbox is not ready
+				return r.status(ctx, pen, v1alpha1.PhaseCreating, false, "", "", "sandbox expired, will resume on next reconcile")
+			} else if cond.Reason == v1beta1.SandboxReasonReconcilerError {
+				return r.fail(ctx, pen, cond.Message)
+			} else if cond.Reason == v1beta1.SandboxReasonInvalidConfiguration {
+				// Permanent (bad podTemplate): retrying cannot fix it, so
+				// the pen fails instead of looping on Creating.
+				return r.fail(ctx, pen, cond.Message)
+			} else {
+				// DependenciesNotReady or other reasons
+				return r.status(ctx, pen, v1alpha1.PhaseCreating, false, "", "", cond.Message)
+			}
+		case string(v1beta1.SandboxConditionSuspended):
+			if cond.Status == metav1.ConditionTrue {
+				return r.status(ctx, pen, v1alpha1.PhaseSuspended, false, "", "", "suspended")
+			}
+		case string(v1beta1.SandboxConditionPodScheduled):
+			if cond.Status == metav1.ConditionFalse {
+				return r.status(ctx, pen, v1alpha1.PhaseCreating, false, "", "", cond.Message)
+			}
+		}
 	}
-	node := pod.Spec.NodeName // the node a scheduled pod landed on
-	return r.status(ctx, pen, v1alpha1.PhaseReady, true, hostname, node, "ready")
+
+	// No Ready condition found
+	return r.status(ctx, pen, v1alpha1.PhaseCreating, false, "", "", "sandbox not ready, no conditions yet")
 }
 
 // namespaceProvisioned returns the owner label value (the dev name the
@@ -231,24 +293,83 @@ func (r *Reconciler) ensureService(ctx context.Context, pen *v1alpha1.Pen, cfg c
 	return nil
 }
 
-func (r *Reconciler) ensurePod(ctx context.Context, pen *v1alpha1.Pen, image, devUser string, res corev1.ResourceList, cfg config.Config) error {
+func (r *Reconciler) ensureSandbox(ctx context.Context, pen *v1alpha1.Pen, image, devUser string, res corev1.ResourceList, cfg config.Config) error {
 	key := types.NamespacedName{Name: podName(pen.Name), Namespace: pen.Namespace}
-	pod := &corev1.Pod{}
-	if err := r.Reader.Get(ctx, key, pod); err == nil {
-		return nil // create-or-leave
+	sandbox := &v1beta1.Sandbox{}
+	if err := r.Reader.Get(ctx, key, sandbox); err == nil {
+		// Convergence: check if spec needs update
+		needsUpdate := false
+
+		// Resume detection, before the mode below is flipped: the pen is
+		// not paused but the sandbox is still in Suspended mode, so this
+		// reconcile switches it back to Running. The stamp is one-shot per
+		// transition because the flip lands in the same update, so the
+		// next pass already sees Running mode.
+		resumed := !pen.Spec.Paused && sandbox.Spec.OperatingMode == v1beta1.SandboxOperatingModeSuspended
+
+		// 1. operatingMode mismatch with pen.Spec.Paused
+		var desiredMode v1beta1.SandboxOperatingMode
+		if pen.Spec.Paused {
+			desiredMode = v1beta1.SandboxOperatingModeSuspended
+		} else {
+			desiredMode = v1beta1.SandboxOperatingModeRunning
+		}
+		if sandbox.Spec.OperatingMode != desiredMode {
+			sandbox.Spec.OperatingMode = desiredMode
+			needsUpdate = true
+		}
+
+		// 2. Reset the shutdown time when the TTL changes, the sandbox
+		// expires, or the sandbox resumes from Suspended mode. A resume
+		// must get a fresh TTL, or the agent-sandbox controller expires
+		// the pod right after resume when the old time is already past.
+		ttl := orDefault(pen.Spec.TTL, cfg.DefaultTTL)
+		storedTTL, hasStoredTTL := sandbox.Annotations[effectiveTTLAnnotation]
+		expired := false
+		for _, cond := range sandbox.Status.Conditions {
+			if cond.Type == string(v1beta1.SandboxConditionReady) &&
+				cond.Status == metav1.ConditionFalse &&
+				cond.Reason == v1beta1.SandboxReasonExpired &&
+				!pen.Spec.Paused {
+				expired = true
+				break
+			}
+		}
+		if !hasStoredTTL || storedTTL != ttl || expired || resumed {
+			sandbox.Spec.Lifecycle, err = newLifecycle(ttl, r.Now())
+			if err != nil {
+				return err
+			}
+			if sandbox.Annotations == nil {
+				sandbox.Annotations = map[string]string{}
+			}
+			sandbox.Annotations[effectiveTTLAnnotation] = ttl
+			needsUpdate = true
+		}
+
+		// 4. Update service if config changed
+		if sandbox.Spec.Service == nil || *sandbox.Spec.Service != cfg.SandboxService {
+			sandbox.Spec.Service = &cfg.SandboxService
+			needsUpdate = true
+		}
+
+		if needsUpdate {
+			if err := r.Client.Update(ctx, sandbox); err != nil {
+				return fmt.Errorf("update sandbox %s: %w", key.Name, err)
+			}
+		}
+		return nil
 	} else if !apierrors.IsNotFound(err) {
 		return err
 	}
+
+	// Create new sandbox
 	hostname := pen.Name
 	if cfg.TailnetDomain != "" {
 		hostname = pen.Name + "." + cfg.TailnetDomain
 	}
 	privileged := true
-	// pens run no cluster-credentialed client, so the pod mounts no
-	// ServiceAccount token.
 	automountToken := false
-	// the dev ConfigMap keys are optional: a pen whose ConfigMap carries
-	// none of them still boots.
 	devConfigOptional := true
 	secKey := "herdr-dev-" + pen.Namespace
 	cmKey := "herdr-dev-" + pen.Namespace
@@ -308,19 +429,128 @@ func (r *Reconciler) ensurePod(ctx context.Context, pen *v1alpha1.Pen, image, de
 			},
 		},
 	}
-	pod = &corev1.Pod{
+
+	// Set operatingMode based on pen.Spec.Paused
+	operatingMode := v1beta1.SandboxOperatingModeRunning
+	if pen.Spec.Paused {
+		operatingMode = v1beta1.SandboxOperatingModeSuspended
+	}
+
+	ttl := orDefault(pen.Spec.TTL, cfg.DefaultTTL)
+	lifecycle, err := newLifecycle(ttl, r.Now())
+	if err != nil {
+		return err
+	}
+
+	sandbox = &v1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        key.Name,
+			Namespace:   pen.Namespace,
+			Labels:      map[string]string{ownerLabel: pen.Name},
+			Annotations: map[string]string{effectiveTTLAnnotation: ttl},
+		},
+		Spec: v1beta1.SandboxSpec{
+			SandboxBlueprint: v1beta1.SandboxBlueprint{
+				PodTemplate: v1beta1.PodTemplate{
+					Spec: spec,
+					ObjectMeta: v1beta1.PodMetadata{
+						Labels: map[string]string{ownerLabel: pen.Name},
+					},
+				},
+				Service:              &cfg.SandboxService,
+				FailedPodPolicy:      v1beta1.FailedPodPolicyRetain,
+				VolumeClaimTemplates: []v1beta1.PersistentVolumeClaimTemplate{},
+			},
+			Lifecycle:     lifecycle,
+			OperatingMode: operatingMode,
+		},
+	}
+	if err := controllerutil.SetControllerReference(pen, sandbox, r.Scheme); err != nil {
+		return err
+	}
+	if err := r.Client.Create(ctx, sandbox); err != nil {
+		return fmt.Errorf("create sandbox %s: %w", key.Name, err)
+	}
+	return nil
+}
+
+// ensureNetworkPolicy manages the per-pen egress allow list. It exists
+// only when spec.egress is on and the operator config names hosts. The
+// namespace default-deny-egress stays in place, so this policy can only
+// narrow egress further (policies intersect).
+func (r *Reconciler) ensureNetworkPolicy(ctx context.Context, pen *v1alpha1.Pen, cfg config.Config) error {
+	key := types.NamespacedName{Name: pen.Name + "-egress", Namespace: pen.Namespace}
+	policy := &networkingv1.NetworkPolicy{}
+	err := r.Reader.Get(ctx, key, policy)
+	exists := err == nil
+	if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	if !pen.Spec.Egress || len(cfg.EgressHosts) == 0 {
+		if exists {
+			if err := r.Client.Delete(ctx, policy); err != nil && !apierrors.IsNotFound(err) {
+				return fmt.Errorf("delete egress network policy %s: %w", key.Name, err)
+			}
+		}
+		return nil
+	}
+
+	dnsPort := intstr.FromInt32(53)
+	tcp := corev1.ProtocolTCP
+	udp := corev1.ProtocolUDP
+	// The DNS rule mirrors the dev-namespace chart: kube-dns in kube-system
+	// on port 53, TCP and UDP.
+	rules := []networkingv1.NetworkPolicyEgressRule{
+		{
+			To: []networkingv1.NetworkPolicyPeer{{
+				NamespaceSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"kubernetes.io/metadata.name": "kube-system"},
+				},
+				PodSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"k8s-app": "kube-dns"},
+				},
+			}},
+			Ports: []networkingv1.NetworkPolicyPort{
+				{Protocol: &tcp, Port: &dnsPort},
+				{Protocol: &udp, Port: &dnsPort},
+			},
+		},
+	}
+	for _, host := range cfg.EgressHosts {
+		rules = append(rules, networkingv1.NetworkPolicyEgressRule{
+			To: []networkingv1.NetworkPolicyPeer{{
+				IPBlock: &networkingv1.IPBlock{CIDR: host},
+			}},
+		})
+	}
+	desired := &networkingv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      key.Name,
 			Namespace: pen.Namespace,
 			Labels:    map[string]string{ownerLabel: pen.Name},
 		},
-		Spec: spec,
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{ownerLabel: pen.Name}},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
+			Egress:      rules,
+		},
 	}
-	if err := controllerutil.SetControllerReference(pen, pod, r.Scheme); err != nil {
+	if exists {
+		if reflect.DeepEqual(policy.Labels, desired.Labels) && reflect.DeepEqual(policy.Spec, desired.Spec) {
+			return nil
+		}
+		policy.Labels = desired.Labels
+		policy.Spec = desired.Spec
+		if err := r.Client.Update(ctx, policy); err != nil {
+			return fmt.Errorf("update egress network policy %s: %w", key.Name, err)
+		}
+		return nil
+	}
+	if err := controllerutil.SetControllerReference(pen, desired, r.Scheme); err != nil {
 		return err
 	}
-	if err := r.Client.Create(ctx, pod); err != nil {
-		return fmt.Errorf("create pod %s: %w", key.Name, err)
+	if err := r.Client.Create(ctx, desired); err != nil {
+		return fmt.Errorf("create egress network policy %s: %w", key.Name, err)
 	}
 	return nil
 }
@@ -383,6 +613,20 @@ func orDefault(v, def string) string {
 	return v
 }
 
+// newLifecycle returns a retained Sandbox shutdown time for a nonempty TTL.
+func newLifecycle(ttl string, now time.Time) (v1beta1.Lifecycle, error) {
+	if ttl == "" {
+		return v1beta1.Lifecycle{}, nil
+	}
+	duration, err := time.ParseDuration(ttl)
+	if err != nil {
+		return v1beta1.Lifecycle{}, fmt.Errorf("invalid TTL %q: %w", ttl, err)
+	}
+	shutdownTime := metav1.NewTime(now.Add(duration))
+	retainPolicy := v1beta1.ShutdownPolicyRetain
+	return v1beta1.Lifecycle{ShutdownTime: &shutdownTime, ShutdownPolicy: &retainPolicy}, nil
+}
+
 func strPtr(s string) *string { return &s }
 
 // runtimeClassPtr: an empty runtime class must be a nil pointer (no
@@ -405,25 +649,4 @@ func pullPolicy(image, cfg string) corev1.PullPolicy {
 		return corev1.PullAlways
 	}
 	return corev1.PullPolicy(cfg)
-}
-
-func podReady(pod *corev1.Pod) bool {
-	if pod.Status.Phase != corev1.PodRunning {
-		return false
-	}
-	cs := pod.Status.ContainerStatuses
-	if len(cs) == 0 {
-		return false
-	}
-	return cs[0].Ready
-}
-
-func podProgress(pod *corev1.Pod) string {
-	phase := string(pod.Status.Phase)
-	if cs := pod.Status.ContainerStatuses; len(cs) > 0 {
-		if w := cs[0].State.Waiting; w != nil {
-			phase = phase + ": " + w.Reason
-		}
-	}
-	return string(phase)
 }

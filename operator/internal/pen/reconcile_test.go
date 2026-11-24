@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -15,6 +18,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	v1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 
 	v1alpha1 "github.com/caktus/pipen/operator/api/v1alpha1"
 	"github.com/caktus/pipen/operator/internal/config"
@@ -32,6 +37,9 @@ func testScheme(t *testing.T) *runtime.Scheme {
 		t.Fatal(err)
 	}
 	if err := v1alpha1.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
+	if err := v1beta1.AddToScheme(s); err != nil {
 		t.Fatal(err)
 	}
 	return s
@@ -135,7 +143,12 @@ func reconcileOnceIn(t *testing.T, c client.Client, ns string) reconcile.Result 
 
 func reconcileOnceWith(t *testing.T, c client.Client, ns string, cfg config.Config) reconcile.Result {
 	t.Helper()
-	r := &Reconciler{Client: c, Reader: c, Scheme: testScheme(t), Config: cfg}
+	return reconcileOnceAt(t, c, ns, cfg, time.Date(2026, 11, 24, 8, 0, 0, 0, time.UTC))
+}
+
+func reconcileOnceAt(t *testing.T, c client.Client, ns string, cfg config.Config, now time.Time) reconcile.Result {
+	t.Helper()
+	r := &Reconciler{Client: c, Reader: c, Scheme: testScheme(t), Config: cfg, Now: func() time.Time { return now }}
 	res, err := r.Reconcile(context.Background(),
 		reconcile.Request{NamespacedName: types.NamespacedName{Name: penName, Namespace: ns}})
 	if err != nil {
@@ -261,32 +274,32 @@ func TestReconcileCreatesObjects(t *testing.T) {
 		t.Errorf("service ownerRefs = %+v, want one Pen ownerRef", svc.OwnerReferences)
 	}
 
-	pod := &corev1.Pod{}
-	if err := c.Get(ctx, types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, pod); err != nil {
-		t.Fatalf("pod not created: %v", err)
+	sandbox := &v1beta1.Sandbox{}
+	if err := c.Get(ctx, types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, sandbox); err != nil {
+		t.Fatalf("sandbox not created: %v", err)
 	}
-	if pod.Spec.RuntimeClassName != nil {
-		t.Errorf("pod runtimeClass = %v, want nil for empty runtime class", pod.Spec.RuntimeClassName)
+	if sandbox.Spec.PodTemplate.Spec.RuntimeClassName != nil {
+		t.Errorf("sandbox podTemplate runtimeClass = %v, want nil for empty runtime class", sandbox.Spec.PodTemplate.Spec.RuntimeClassName)
 	}
-	sec := pod.Spec.Containers[0].SecurityContext
+	sec := sandbox.Spec.PodTemplate.Spec.Containers[0].SecurityContext
 	if sec == nil || sec.Privileged == nil || !*sec.Privileged {
-		t.Error("pod container not privileged")
+		t.Error("sandbox container not privileged")
 	}
-	if pod.Spec.NodeSelector["openebs.io/engine"] != "mayastor" {
-		t.Errorf("pod nodeSelector = %v, want openebs.io/engine=mayastor", pod.Spec.NodeSelector)
+	if sandbox.Spec.PodTemplate.Spec.NodeSelector["openebs.io/engine"] != "mayastor" {
+		t.Errorf("sandbox nodeSelector = %v, want openebs.io/engine=mayastor", sandbox.Spec.PodTemplate.Spec.NodeSelector)
 	}
-	ctr := pod.Spec.Containers[0]
+	ctr := sandbox.Spec.PodTemplate.Spec.Containers[0]
 	if ctr.Image != "ghcr.io/caktus/pipen:latest" {
-		t.Errorf("pod image = %q, want cfg default", ctr.Image)
+		t.Errorf("sandbox image = %q, want cfg default", ctr.Image)
 	}
 	if ctr.ImagePullPolicy != corev1.PullAlways {
-		t.Errorf("pod pullPolicy = %q, want Always for latest tag", ctr.ImagePullPolicy)
+		t.Errorf("sandbox pullPolicy = %q, want Always for latest tag", ctr.ImagePullPolicy)
 	}
 	if ctr.Resources.Requests.Cpu().String() != "4" || ctr.Resources.Limits.Cpu().String() != "4" {
-		t.Errorf("pod cpu req/lim wrong: %+v", ctr.Resources)
+		t.Errorf("sandbox cpu req/lim wrong: %+v", ctr.Resources)
 	}
 	if ctr.Resources.Requests.Memory().String() != "8Gi" || ctr.Resources.Limits.Memory().String() != "8Gi" {
-		t.Errorf("pod memory req/lim wrong: %+v", ctr.Resources)
+		t.Errorf("sandbox memory req/lim wrong: %+v", ctr.Resources)
 	}
 	envs := map[string]string{}
 	for _, e := range ctr.Env {
@@ -303,22 +316,22 @@ func TestReconcileCreatesObjects(t *testing.T) {
 		t.Errorf("volumeMounts = %v", mounts)
 	}
 	vols := map[string]bool{}
-	for _, v := range pod.Spec.Volumes {
+	for _, v := range sandbox.Spec.PodTemplate.Spec.Volumes {
 		vols[v.Name] = true
 	}
 	if !vols["home"] || !vols["dev-secret"] || !vols["dev-config"] {
 		t.Errorf("volumes = %v", vols)
 	}
-	if len(pod.OwnerReferences) != 1 || pod.OwnerReferences[0].Kind != "Pen" {
-		t.Errorf("pod ownerRefs = %+v, want one Pen ownerRef", pod.OwnerReferences)
+	if len(sandbox.OwnerReferences) != 1 || sandbox.OwnerReferences[0].Kind != "Pen" {
+		t.Errorf("sandbox ownerRefs = %+v, want one Pen ownerRef", sandbox.OwnerReferences)
 	}
-	if pod.Labels["herdr.dev/env"] != penName {
-		t.Errorf("pod label herdr.dev/env = %q", pod.Labels["herdr.dev/env"])
+	if sandbox.Labels["herdr.dev/env"] != penName {
+		t.Errorf("sandbox label herdr.dev/env = %q", sandbox.Labels["herdr.dev/env"])
 	}
 
 	p := getPen(t, c)
 	if p.Status.Phase != v1alpha1.PhaseCreating {
-		t.Errorf("phase = %q, want Creating (pod not ready yet)", p.Status.Phase)
+		t.Errorf("phase = %q, want Creating (sandbox not ready yet)", p.Status.Phase)
 	}
 	if p.Status.Ready {
 		t.Error("ready = true, want false")
@@ -336,15 +349,15 @@ func TestDevConfigVolumeOptionalAndNoSAToken(t *testing.T) {
 	objs := append([]client.Object{ownedNS(t, devNS), newPen()}, devObjects(devNS)...)
 	c := newClient(t, objs...)
 	reconcileOnce(t, c)
-	pod := &corev1.Pod{}
-	if err := c.Get(context.Background(), types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, pod); err != nil {
+	sandbox := &v1beta1.Sandbox{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, sandbox); err != nil {
 		t.Fatal(err)
 	}
-	if pod.Spec.AutomountServiceAccountToken == nil || *pod.Spec.AutomountServiceAccountToken {
-		t.Errorf("automountServiceAccountToken = %v, want false", pod.Spec.AutomountServiceAccountToken)
+	if sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken == nil || *sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken {
+		t.Errorf("automountServiceAccountToken = %v, want false", sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken)
 	}
 	var cm *corev1.ConfigMapVolumeSource
-	for _, v := range pod.Spec.Volumes {
+	for _, v := range sandbox.Spec.PodTemplate.Spec.Volumes {
 		if v.Name == "dev-config" {
 			cm = v.ConfigMap
 		}
@@ -365,12 +378,12 @@ func TestReconcileNoRuntimeClass(t *testing.T) {
 	objs := append([]client.Object{ownedNS(t, devNS), newPen()}, devObjects(devNS)...)
 	c := newClient(t, objs...)
 	reconcileOnceWith(t, c, devNS, cfg)
-	pod := &corev1.Pod{}
-	if err := c.Get(context.Background(), types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, pod); err != nil {
+	sandbox := &v1beta1.Sandbox{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, sandbox); err != nil {
 		t.Fatal(err)
 	}
-	if pod.Spec.RuntimeClassName != nil {
-		t.Errorf("pod runtimeClass = %q, want none", *pod.Spec.RuntimeClassName)
+	if sandbox.Spec.PodTemplate.Spec.RuntimeClassName != nil {
+		t.Errorf("sandbox runtimeClass = %q, want none", *sandbox.Spec.PodTemplate.Spec.RuntimeClassName)
 	}
 }
 
@@ -382,18 +395,18 @@ func TestReconcileCustomRuntimeClass(t *testing.T) {
 	objs := append([]client.Object{ownedNS(t, devNS), newPen()}, devObjects(devNS)...)
 	c := newClient(t, objs...)
 	reconcileOnceWith(t, c, devNS, cfg)
-	pod := &corev1.Pod{}
-	if err := c.Get(context.Background(), types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, pod); err != nil {
+	sandbox := &v1beta1.Sandbox{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, sandbox); err != nil {
 		t.Fatal(err)
 	}
-	if pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName != "gvisor" {
-		t.Errorf("pod runtimeClass = %v, want gvisor", pod.Spec.RuntimeClassName)
+	if sandbox.Spec.PodTemplate.Spec.RuntimeClassName == nil || *sandbox.Spec.PodTemplate.Spec.RuntimeClassName != "gvisor" {
+		t.Errorf("sandbox runtimeClass = %v, want gvisor", sandbox.Spec.PodTemplate.Spec.RuntimeClassName)
 	}
 }
 
 func TestReconcileReady(t *testing.T) {
 	objs := append([]client.Object{
-		ownedNS(t, devNS), newPen(), readyPod(), svcWithIngress("tobias-smoke.ts.example.net", ""),
+		ownedNS(t, devNS), newPen(), readySandbox(), svcWithIngress("tobias-smoke.ts.example.net", ""),
 	}, devObjects(devNS)...)
 	c := newClient(t, objs...)
 	res := reconcileOnce(t, c)
@@ -418,7 +431,7 @@ func TestReconcileReady(t *testing.T) {
 
 func TestReconcileIPFallback(t *testing.T) {
 	objs := append([]client.Object{
-		ownedNS(t, devNS), newPen(), readyPod(), svcWithIngress("", "100.64.0.9"),
+		ownedNS(t, devNS), newPen(), readySandbox(), svcWithIngress("", "100.64.0.9"),
 	}, devObjects(devNS)...)
 	c := newClient(t, objs...)
 	reconcileOnce(t, c)
@@ -455,13 +468,13 @@ func TestReconcilePrefixedNamespace(t *testing.T) {
 	if err := c.Get(ctx, types.NamespacedName{Name: penName, Namespace: ns}, svc); err != nil {
 		t.Fatalf("service not created in %s: %v", ns, err)
 	}
-	pod := &corev1.Pod{}
-	if err := c.Get(ctx, types.NamespacedName{Name: "env-" + penName, Namespace: ns}, pod); err != nil {
-		t.Fatalf("pod not created in %s: %v", ns, err)
+	sandbox := &v1beta1.Sandbox{}
+	if err := c.Get(ctx, types.NamespacedName{Name: "env-" + penName, Namespace: ns}, sandbox); err != nil {
+		t.Fatalf("sandbox not created in %s: %v", ns, err)
 	}
 
 	envs := map[string]string{}
-	for _, e := range pod.Spec.Containers[0].Env {
+	for _, e := range sandbox.Spec.PodTemplate.Spec.Containers[0].Env {
 		envs[e.Name] = e.Value
 	}
 	if envs["DEV_USER"] != devNS {
@@ -469,7 +482,7 @@ func TestReconcilePrefixedNamespace(t *testing.T) {
 	}
 	secVol := ""
 	cmVol := ""
-	for _, v := range pod.Spec.Volumes {
+	for _, v := range sandbox.Spec.PodTemplate.Spec.Volumes {
 		if v.Secret != nil {
 			secVol = v.Secret.SecretName
 		}
@@ -489,7 +502,7 @@ func TestReconcilePrefixedNamespace(t *testing.T) {
 		t.Fatalf("get pen: %v", err)
 	}
 	if p.Status.Phase != v1alpha1.PhaseCreating {
-		t.Errorf("phase = %q, want Creating (pod not ready yet)", p.Status.Phase)
+		t.Errorf("phase = %q, want Creating (sandbox not ready yet)", p.Status.Phase)
 	}
 	if res.RequeueAfter == 0 {
 		t.Error("expected requeue while creating")
@@ -528,8 +541,8 @@ func TestReconcileCreateErrorFails(t *testing.T) {
 		WithStatusSubresource(&v1alpha1.Pen{}).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
-				if _, ok := obj.(*corev1.Pod); ok {
-					return fmt.Errorf("forbidden: no raw pod create in this test")
+				if _, ok := obj.(*v1beta1.Sandbox); ok {
+					return fmt.Errorf("forbidden: no sandbox create in this test")
 				}
 				return c.Create(ctx, obj, opts...)
 			},
@@ -569,11 +582,11 @@ func TestReconcileSpecDefaultsAndOverride(t *testing.T) {
 	objs := append([]client.Object{ownedNS(t, devNS), pen}, devObjects(devNS)...)
 	c := newClient(t, objs...)
 	reconcileOnce(t, c)
-	pod := &corev1.Pod{}
-	if err := c.Get(context.Background(), types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, pod); err != nil {
+	sandbox := &v1beta1.Sandbox{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, sandbox); err != nil {
 		t.Fatal(err)
 	}
-	ctr := pod.Spec.Containers[0]
+	ctr := sandbox.Spec.PodTemplate.Spec.Containers[0]
 	if ctr.Resources.Requests.Cpu().String() != "8" {
 		t.Errorf("cpu = %s, want spec override 8", ctr.Resources.Requests.Cpu())
 	}
@@ -589,21 +602,718 @@ func TestReconcileSpecDefaultsAndOverride(t *testing.T) {
 	}
 }
 
-// helper to avoid importing interceptor at file top in case of version drift
+// TestReconcileCreatesSandbox tests that the reconciler creates a Sandbox
+// instead of a Pod with the correct podTemplate.
+func TestReconcileCreatesSandbox(t *testing.T) {
+	objs := append([]client.Object{ownedNS(t, devNS), newPen()}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnce(t, c)
+	ctx := context.Background()
 
-func TestReconcileEmptyStorageClass(t *testing.T) {
+	// Should create sandbox instead of pod
+	sandbox := &v1beta1.Sandbox{}
+	key := types.NamespacedName{Name: "env-" + penName, Namespace: devNS}
+	if err := c.Get(ctx, key, sandbox); err != nil {
+		t.Fatalf("sandbox not created: %v", err)
+	}
+
+	// Check podTemplate spec matches what ensurePod would have created
+	if sandbox.Spec.PodTemplate.Spec.RuntimeClassName != nil {
+		t.Errorf("podTemplate.spec.runtimeClassName = %v, want nil for empty runtime class", sandbox.Spec.PodTemplate.Spec.RuntimeClassName)
+	}
+	ctr := sandbox.Spec.PodTemplate.Spec.Containers[0]
+	if ctr.Image != "ghcr.io/caktus/pipen:latest" {
+		t.Errorf("podTemplate container image = %q, want cfg default", ctr.Image)
+	}
+	if ctr.Resources.Requests.Cpu().String() != "4" {
+		t.Errorf("podTemplate cpu = %s, want 4", ctr.Resources.Requests.Cpu())
+	}
+	envs := map[string]string{}
+	for _, e := range ctr.Env {
+		envs[e.Name] = e.Value
+	}
+	if envs["DEV_USER"] != devNS {
+		t.Errorf("DEV_USER = %q, want %q", envs["DEV_USER"], devNS)
+	}
+
+	// Check service is false by default
+	if sandbox.Spec.Service != nil && *sandbox.Spec.Service {
+		t.Errorf("spec.service = %v, want false or nil", sandbox.Spec.Service)
+	}
+
+	// Check operatingMode defaults to Running
+	if sandbox.Spec.OperatingMode != v1beta1.SandboxOperatingModeRunning {
+		t.Errorf("operatingMode = %q, want Running", sandbox.Spec.OperatingMode)
+	}
+
+	// Check no volumeClaimTemplates
+	if len(sandbox.Spec.VolumeClaimTemplates) != 0 {
+		t.Errorf("volumeClaimTemplates = %v, want empty", sandbox.Spec.VolumeClaimTemplates)
+	}
+
+	// Check controller reference
+	if len(sandbox.OwnerReferences) != 1 || sandbox.OwnerReferences[0].Kind != "Pen" {
+		t.Errorf("sandbox ownerRefs = %+v, want one Pen ownerRef", sandbox.OwnerReferences)
+	}
+}
+
+// TestReconcileSandboxServiceTrue tests sandbox creation with config.sandboxService = true.
+func TestReconcileSandboxServiceTrue(t *testing.T) {
 	cfg := testConfig()
-	cfg.StorageClass = ""
+	cfg.SandboxService = true
 	objs := append([]client.Object{ownedNS(t, devNS), newPen()}, devObjects(devNS)...)
 	c := newClient(t, objs...)
 	reconcileOnceWith(t, c, devNS, cfg)
 	ctx := context.Background()
 
-	pvc := &corev1.PersistentVolumeClaim{}
-	if err := c.Get(ctx, types.NamespacedName{Name: penName + "-home", Namespace: devNS}, pvc); err != nil {
-		t.Fatalf("pvc not created: %v", err)
+	sandbox := &v1beta1.Sandbox{}
+	if err := c.Get(ctx, types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, sandbox); err != nil {
+		t.Fatalf("sandbox not created: %v", err)
 	}
-	if pvc.Spec.StorageClassName != nil {
-		t.Errorf("pvc storageClass = %v, want nil for empty storage class", pvc.Spec.StorageClassName)
+
+	if sandbox.Spec.Service == nil || !*sandbox.Spec.Service {
+		t.Errorf("spec.service = %v, want true", sandbox.Spec.Service)
+	}
+}
+
+// Helper to create a Sandbox with Ready condition
+func readySandbox() *v1beta1.Sandbox {
+	sb := &v1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "env-" + penName, Namespace: devNS},
+		Spec: v1beta1.SandboxSpec{
+			OperatingMode: v1beta1.SandboxOperatingModeRunning,
+			SandboxBlueprint: v1beta1.SandboxBlueprint{
+				PodTemplate: v1beta1.PodTemplate{
+					Spec: corev1.PodSpec{NodeName: "storage-1"},
+				},
+			},
+		},
+		Status: v1beta1.SandboxStatus{
+			NodeName: "storage-1",
+			Conditions: []metav1.Condition{{
+				Type:   string(v1beta1.SandboxConditionReady),
+				Status: metav1.ConditionTrue,
+				Reason: v1beta1.SandboxReasonDependenciesReady,
+			}},
+		},
+	}
+	return sb
+}
+
+// Helper to create a Sandbox with PodScheduled=False
+func unscheduledSandbox() *v1beta1.Sandbox {
+	sb := &v1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "env-" + penName, Namespace: devNS},
+		Status: v1beta1.SandboxStatus{
+			Conditions: []metav1.Condition{{
+				Type:    string(v1beta1.SandboxConditionPodScheduled),
+				Status:  metav1.ConditionFalse,
+				Reason:  "Unschedulable",
+				Message: "0/1 nodes are available",
+			}},
+		},
+	}
+	return sb
+}
+
+// Helper to create a Sandbox with Suspended condition
+func suspendedSandbox() *v1beta1.Sandbox {
+	sb := &v1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "env-" + penName, Namespace: devNS},
+		Spec: v1beta1.SandboxSpec{
+			OperatingMode: v1beta1.SandboxOperatingModeSuspended,
+		},
+		Status: v1beta1.SandboxStatus{
+			Conditions: []metav1.Condition{{
+				Type:   string(v1beta1.SandboxConditionSuspended),
+				Status: metav1.ConditionTrue,
+				Reason: v1beta1.SandboxReasonSuspendedPodTerminated,
+			}},
+		},
+	}
+	return sb
+}
+
+// TestReconcilePausedMapsToSuspended tests that pen.Spec.Paused maps to operatingMode Suspended.
+func TestReconcilePausedMapsToSuspended(t *testing.T) {
+	pen := newPen()
+	pen.Spec.Paused = true
+	objs := append([]client.Object{ownedNS(t, devNS), pen}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnce(t, c)
+	ctx := context.Background()
+
+	sandbox := &v1beta1.Sandbox{}
+	if err := c.Get(ctx, types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, sandbox); err != nil {
+		t.Fatalf("sandbox not created: %v", err)
+	}
+
+	if sandbox.Spec.OperatingMode != v1beta1.SandboxOperatingModeSuspended {
+		t.Errorf("operatingMode = %q, want Suspended", sandbox.Spec.OperatingMode)
+	}
+}
+
+// TestReconcileTTL tests that pen.Spec.TTL sets sandbox lifecycle.
+func TestReconcileTTL(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "1h"
+	objs := append([]client.Object{ownedNS(t, devNS), pen}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnce(t, c)
+	ctx := context.Background()
+
+	sandbox := &v1beta1.Sandbox{}
+	if err := c.Get(ctx, types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, sandbox); err != nil {
+		t.Fatalf("sandbox not created: %v", err)
+	}
+
+	if sandbox.Spec.ShutdownTime == nil {
+		t.Error("shutdownTime not set")
+	}
+	if sandbox.Spec.ShutdownPolicy == nil || *sandbox.Spec.ShutdownPolicy != v1beta1.ShutdownPolicyRetain {
+		t.Errorf("shutdownPolicy = %v, want Retain", sandbox.Spec.ShutdownPolicy)
+	}
+}
+
+// TestReconcileDefaultTTL tests that config.defaultTTL is used when pen.Spec.TTL empty.
+func TestReconcileDefaultTTL(t *testing.T) {
+	cfg := testConfig()
+	cfg.DefaultTTL = "2h"
+	pen := newPen()
+	objs := append([]client.Object{ownedNS(t, devNS), pen}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, cfg)
+	ctx := context.Background()
+
+	sandbox := &v1beta1.Sandbox{}
+	if err := c.Get(ctx, types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, sandbox); err != nil {
+		t.Fatalf("sandbox not created: %v", err)
+	}
+
+	if sandbox.Spec.ShutdownTime == nil {
+		t.Error("shutdownTime not set from defaultTTL")
+	}
+}
+
+// TestReconcilePenTTLOverridesDefault tests pen TTL overrides config default.
+func TestReconcilePenTTLOverridesDefault(t *testing.T) {
+	cfg := testConfig()
+	cfg.DefaultTTL = "2h"
+	pen := newPen()
+	pen.Spec.TTL = "30m"
+	objs := append([]client.Object{ownedNS(t, devNS), pen}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, cfg)
+	ctx := context.Background()
+
+	sandbox := &v1beta1.Sandbox{}
+	if err := c.Get(ctx, types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, sandbox); err != nil {
+		t.Fatalf("sandbox not created: %v", err)
+	}
+
+	if sandbox.Spec.ShutdownTime == nil {
+		t.Error("shutdownTime not set")
+	}
+}
+
+// TestReconcileInvalidTTLFails tests invalid TTL duration fails.
+func TestReconcileInvalidTTLFails(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "not-a-duration"
+	objs := append([]client.Object{ownedNS(t, devNS), pen}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnce(t, c)
+	p := getPen(t, c)
+	if p.Status.Phase != v1alpha1.PhaseFailed {
+		t.Errorf("phase = %q, want Failed for invalid TTL", p.Status.Phase)
+	}
+	if !strings.Contains(p.Status.Message, "invalid TTL") {
+		t.Errorf("message = %q, want 'invalid TTL'", p.Status.Message)
+	}
+}
+
+// TestReconcileSuspendedSandboxStatus tests that a suspended sandbox
+// reports PhaseSuspended in pen status.
+func TestReconcileSuspendedSandboxStatus(t *testing.T) {
+	pen := newPen()
+	pen.Spec.Paused = true
+	suspendedSB := suspendedSandbox()
+	objs := append([]client.Object{ownedNS(t, devNS), pen, suspendedSB, svcWithIngress("", "")}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnce(t, c)
+	p := getPen(t, c)
+	if p.Status.Phase != v1alpha1.PhaseSuspended {
+		t.Errorf("phase = %q, want Suspended", p.Status.Phase)
+	}
+}
+
+// TestReconcileSandboxReconcilerErrorFails tests that a sandbox
+// ReconcilerError condition fails the pen with the sandbox message.
+func TestReconcileSandboxReconcilerErrorFails(t *testing.T) {
+	sandbox := &v1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "env-" + penName, Namespace: devNS},
+		Status: v1beta1.SandboxStatus{Conditions: []metav1.Condition{{
+			Type:    string(v1beta1.SandboxConditionReady),
+			Status:  metav1.ConditionFalse,
+			Reason:  v1beta1.SandboxReasonReconcilerError,
+			Message: "sandbox pod creation failed",
+		}}},
+	}
+	objs := append([]client.Object{ownedNS(t, devNS), newPen(), sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnce(t, c)
+	p := getPen(t, c)
+	if p.Status.Phase != v1alpha1.PhaseFailed {
+		t.Errorf("phase = %q, want Failed", p.Status.Phase)
+	}
+	if p.Status.Message != "sandbox pod creation failed" {
+		t.Errorf("message = %q, want sandbox error", p.Status.Message)
+	}
+}
+
+// TestReconcileSandboxInvalidConfigurationFails tests that the permanent
+// InvalidConfiguration reason fails the pen (no retry loop).
+func TestReconcileSandboxInvalidConfigurationFails(t *testing.T) {
+	sandbox := &v1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "env-" + penName, Namespace: devNS},
+		Status: v1beta1.SandboxStatus{Conditions: []metav1.Condition{{
+			Type:    string(v1beta1.SandboxConditionReady),
+			Status:  metav1.ConditionFalse,
+			Reason:  v1beta1.SandboxReasonInvalidConfiguration,
+			Message: "invalid pod template",
+		}}},
+	}
+	objs := append([]client.Object{ownedNS(t, devNS), newPen(), sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnce(t, c)
+	p := getPen(t, c)
+	if p.Status.Phase != v1alpha1.PhaseFailed {
+		t.Errorf("phase = %q, want Failed", p.Status.Phase)
+	}
+	if p.Status.Message != "invalid pod template" {
+		t.Errorf("message = %q, want sandbox error", p.Status.Message)
+	}
+}
+
+func TestReconcileUnscheduledSandboxCreates(t *testing.T) {
+	objs := append([]client.Object{ownedNS(t, devNS), newPen(), unscheduledSandbox()}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	res := reconcileOnce(t, c)
+	p := getPen(t, c)
+	if p.Status.Phase != v1alpha1.PhaseCreating {
+		t.Errorf("phase = %q, want Creating", p.Status.Phase)
+	}
+	if p.Status.Message != "0/1 nodes are available" {
+		t.Errorf("message = %q, want scheduler message", p.Status.Message)
+	}
+	if res.RequeueAfter != requeueCreating {
+		t.Errorf("RequeueAfter = %v, want %v", res.RequeueAfter, requeueCreating)
+	}
+}
+
+func TestReconcileTTLUsesFixedClock(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "1h"
+	objs := append([]client.Object{ownedNS(t, devNS), pen}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, testConfig())
+	sandbox := getSandbox(t, c)
+	want := "2026-11-24T09:00:00Z"
+	if got := sandbox.Spec.ShutdownTime.UTC().Format(time.RFC3339); got != want {
+		t.Errorf("shutdownTime = %q, want %q", got, want)
+	}
+	if got := sandbox.Annotations[effectiveTTLAnnotation]; got != "1h" {
+		t.Errorf("effective TTL = %q, want 1h", got)
+	}
+}
+
+func TestReconcileTTLChangeResetsShutdownTime(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "2h"
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 9, 0, 0, 0, time.UTC))
+	sandbox := sandboxWithTTL("1h", &oldTime)
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, testConfig())
+	got := getSandbox(t, c)
+	want := "2026-11-24T10:00:00Z"
+	if got.Spec.ShutdownTime.UTC().Format(time.RFC3339) != want {
+		t.Errorf("shutdownTime = %v, want %s", got.Spec.ShutdownTime, want)
+	}
+	if got.Annotations[effectiveTTLAnnotation] != "2h" {
+		t.Errorf("effective TTL = %q, want 2h", got.Annotations[effectiveTTLAnnotation])
+	}
+}
+
+func TestReconcileUnchangedTTLKeepsShutdownTime(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "1h"
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 9, 0, 0, 0, time.UTC))
+	sandbox := sandboxWithTTL("1h", &oldTime)
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	for i := 0; i < 2; i++ {
+		reconcileOnceAt(t, c, devNS, testConfig(), time.Date(2026, 11, 24, 8+i, 0, 0, 0, time.UTC))
+	}
+	got := getSandbox(t, c)
+	if !got.Spec.ShutdownTime.Equal(&oldTime) {
+		t.Errorf("shutdownTime = %v, want unchanged %v", got.Spec.ShutdownTime, oldTime)
+	}
+	if got.ResourceVersion != sandbox.ResourceVersion {
+		t.Errorf("sandbox updated on unchanged TTL: resourceVersion %q, want %q", got.ResourceVersion, sandbox.ResourceVersion)
+	}
+}
+
+func TestReconcileRemovedTTLClearsLifecycle(t *testing.T) {
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 9, 0, 0, 0, time.UTC))
+	sandbox := sandboxWithTTL("1h", &oldTime)
+	retain := v1beta1.ShutdownPolicyRetain
+	sandbox.Spec.ShutdownPolicy = &retain
+	objs := append([]client.Object{ownedNS(t, devNS), newPen(), sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, testConfig())
+	got := getSandbox(t, c)
+	if got.Spec.ShutdownTime != nil || got.Spec.ShutdownPolicy != nil {
+		t.Errorf("lifecycle = %+v, want empty", got.Spec.Lifecycle)
+	}
+	if got.Annotations[effectiveTTLAnnotation] != "" {
+		t.Errorf("effective TTL = %q, want empty", got.Annotations[effectiveTTLAnnotation])
+	}
+}
+
+func TestReconcileExpiredSandboxResetsShutdownTimeAtFixedClock(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "1h"
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 7, 0, 0, 0, time.UTC))
+	sandbox := sandboxWithTTL("1h", &oldTime)
+	sandbox.Status.Conditions = []metav1.Condition{{
+		Type: string(v1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: v1beta1.SandboxReasonExpired,
+	}}
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, testConfig())
+	got := getSandbox(t, c)
+	want := "2026-11-24T09:00:00Z"
+	if got.Spec.ShutdownTime.UTC().Format(time.RFC3339) != want {
+		t.Errorf("shutdownTime = %v, want %s", got.Spec.ShutdownTime, want)
+	}
+}
+
+// TestReconcileResumeFromSuspendedResetsShutdownTime: pause then resume
+// with an unchanged TTL must stamp a fresh shutdownTime. Without it, the
+// agent-sandbox controller expires the pod again right after resume when
+// the old shutdownTime is already in the past.
+func TestReconcileResumeFromSuspendedResetsShutdownTime(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "1h"
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 7, 0, 0, 0, time.UTC))
+	sandbox := suspendedSandboxWithTTL("1h", &oldTime)
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, testConfig())
+	got := getSandbox(t, c)
+	if got.Spec.OperatingMode != v1beta1.SandboxOperatingModeRunning {
+		t.Errorf("operatingMode = %q, want Running", got.Spec.OperatingMode)
+	}
+	want := "2026-11-24T09:00:00Z"
+	if got.Spec.ShutdownTime.UTC().Format(time.RFC3339) != want {
+		t.Errorf("shutdownTime = %v, want fresh %s", got.Spec.ShutdownTime, want)
+	}
+}
+
+// TestReconcileResumeStampsOnce: the fresh shutdownTime from the resume
+// must survive later plain reconciles, not move on every pass (the
+// update-every-reconcile loop fixed in the TTL reset change).
+func TestReconcileResumeStampsOnce(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "1h"
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 7, 0, 0, 0, time.UTC))
+	sandbox := suspendedSandboxWithTTL("1h", &oldTime)
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceAt(t, c, devNS, testConfig(), time.Date(2026, 11, 24, 8, 0, 0, 0, time.UTC))
+	resumed := getSandbox(t, c)
+	if resumed.Spec.ShutdownTime.UTC().Format(time.RFC3339) != "2026-11-24T09:00:00Z" {
+		t.Fatalf("shutdownTime = %v, want fresh 2026-11-24T09:00:00Z", resumed.Spec.ShutdownTime)
+	}
+	for i := 1; i <= 2; i++ {
+		reconcileOnceAt(t, c, devNS, testConfig(), time.Date(2026, 11, 24, 8+i, 0, 0, 0, time.UTC))
+		got := getSandbox(t, c)
+		if !got.Spec.ShutdownTime.Equal(resumed.Spec.ShutdownTime) {
+			t.Errorf("reconcile %d: shutdownTime = %v, want unchanged %v",
+				i, got.Spec.ShutdownTime, resumed.Spec.ShutdownTime)
+		}
+		if got.ResourceVersion != resumed.ResourceVersion {
+			t.Errorf("reconcile %d: sandbox updated: resourceVersion %q, want %q",
+				i, got.ResourceVersion, resumed.ResourceVersion)
+		}
+	}
+}
+
+func getSandbox(t *testing.T, c client.Client) *v1beta1.Sandbox {
+	t.Helper()
+	sandbox := &v1beta1.Sandbox{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, sandbox); err != nil {
+		t.Fatal(err)
+	}
+	return sandbox
+}
+
+// suspendedSandboxWithTTL is a suspended sandbox: operatingMode Suspended,
+// an existing shutdownTime, and the stored effective TTL annotation.
+func suspendedSandboxWithTTL(ttl string, shutdownTime *metav1.Time) *v1beta1.Sandbox {
+	sb := sandboxWithTTL(ttl, shutdownTime)
+	sb.Spec.OperatingMode = v1beta1.SandboxOperatingModeSuspended
+	return sb
+}
+
+func sandboxWithTTL(ttl string, shutdownTime *metav1.Time) *v1beta1.Sandbox {
+	service := false
+	return &v1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "env-" + penName, Namespace: devNS,
+			Annotations: map[string]string{effectiveTTLAnnotation: ttl},
+		},
+		Spec: v1beta1.SandboxSpec{
+			SandboxBlueprint: v1beta1.SandboxBlueprint{Service: &service},
+			OperatingMode:    v1beta1.SandboxOperatingModeRunning,
+			Lifecycle:        v1beta1.Lifecycle{ShutdownTime: shutdownTime},
+		},
+	}
+}
+
+func egressPolicy(t *testing.T, c client.Client) *networkingv1.NetworkPolicy {
+	t.Helper()
+	policy := &networkingv1.NetworkPolicy{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: penName + "-egress", Namespace: devNS}, policy); err != nil {
+		t.Fatalf("egress NetworkPolicy not created: %v", err)
+	}
+	return policy
+}
+
+// A pen with spec.egress and configured hosts gets an egress policy that
+// selects its pod, allows only DNS and the configured hosts, and is owned
+// by the Pen.
+func TestReconcileEgressNetworkPolicy(t *testing.T) {
+	pen := newPen()
+	pen.Spec.Egress = true
+	cfg := testConfig()
+	cfg.EgressHosts = []string{"llm.example.net", "proxy.golang.org"}
+	objs := append([]client.Object{ownedNS(t, devNS), pen}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, cfg)
+
+	policy := egressPolicy(t, c)
+	if len(policy.OwnerReferences) != 1 || policy.OwnerReferences[0].Kind != "Pen" || policy.OwnerReferences[0].Name != penName {
+		t.Errorf("ownerRefs = %+v, want one Pen controller ref", policy.OwnerReferences)
+	}
+	if policy.OwnerReferences[0].Controller == nil || !*policy.OwnerReferences[0].Controller {
+		t.Error("ownerRef is not a controller ref")
+	}
+	if got := policy.Spec.PodSelector.MatchLabels; got[ownerLabel] != penName || len(got) != 1 {
+		t.Errorf("podSelector = %v, want %s=%s only", got, ownerLabel, penName)
+	}
+	if len(policy.Spec.PolicyTypes) != 1 || policy.Spec.PolicyTypes[0] != networkingv1.PolicyTypeEgress {
+		t.Errorf("policyTypes = %v, want [Egress]", policy.Spec.PolicyTypes)
+	}
+	if len(policy.Spec.Egress) != 3 {
+		t.Fatalf("egress rules = %d, want 3 (DNS + 2 hosts)", len(policy.Spec.Egress))
+	}
+
+	// Rule 1 is the kube-dns rule from the dev-namespace chart.
+	dns := policy.Spec.Egress[0]
+	if len(dns.To) != 1 {
+		t.Fatalf("DNS rule peers = %d, want 1", len(dns.To))
+	}
+	peer := dns.To[0]
+	if peer.IPBlock != nil {
+		t.Error("DNS rule must select kube-dns pods, not an ipBlock")
+	}
+	if peer.NamespaceSelector == nil || peer.NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] != "kube-system" {
+		t.Errorf("DNS namespaceSelector = %v, want kubernetes.io/metadata.name=kube-system", peer.NamespaceSelector)
+	}
+	if peer.PodSelector == nil || peer.PodSelector.MatchLabels["k8s-app"] != "kube-dns" {
+		t.Errorf("DNS podSelector = %v, want k8s-app=kube-dns", peer.PodSelector)
+	}
+	if len(dns.Ports) != 2 {
+		t.Fatalf("DNS ports = %d, want 2 (TCP and UDP 53)", len(dns.Ports))
+	}
+	for i, protocol := range []corev1.Protocol{corev1.ProtocolTCP, corev1.ProtocolUDP} {
+		if dns.Ports[i].Protocol == nil || *dns.Ports[i].Protocol != protocol {
+			t.Errorf("DNS port %d protocol = %v, want %s", i, dns.Ports[i].Protocol, protocol)
+		}
+		if dns.Ports[i].Port == nil || dns.Ports[i].Port.IntValue() != 53 {
+			t.Errorf("DNS port %d = %v, want 53", i, dns.Ports[i].Port)
+		}
+	}
+
+	// One ipBlock rule per configured host, in config order.
+	for i, host := range []string{"llm.example.net", "proxy.golang.org"} {
+		rule := policy.Spec.Egress[i+1]
+		if len(rule.To) != 1 || rule.To[0].IPBlock == nil {
+			t.Fatalf("rule %d = %+v, want one ipBlock peer", i+1, rule)
+		}
+		if rule.To[0].IPBlock.CIDR != host {
+			t.Errorf("rule %d cidr = %q, want %q", i+1, rule.To[0].IPBlock.CIDR, host)
+		}
+		if len(rule.Ports) != 0 {
+			t.Errorf("rule %d ports = %v, want all ports", i+1, rule.Ports)
+		}
+	}
+}
+
+// A changed host list must replace the old allow rules. An unchanged list
+// must not update the policy again.
+func TestReconcileEgressPolicyConvergesHostChanges(t *testing.T) {
+	pen := newPen()
+	pen.Spec.Egress = true
+	cfg := testConfig()
+	cfg.EgressHosts = []string{"a.example"}
+	objs := append([]client.Object{ownedNS(t, devNS), pen}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, cfg)
+
+	created := egressPolicy(t, c)
+	if got := created.Spec.Egress[1].To[0].IPBlock.CIDR; got != "a.example" {
+		t.Fatalf("initial host cidr = %q, want a.example", got)
+	}
+	reconcileOnceWith(t, c, devNS, cfg)
+	stable := egressPolicy(t, c)
+	if stable.ResourceVersion != created.ResourceVersion {
+		t.Errorf("unchanged hosts updated policy: resourceVersion %q, want %q", stable.ResourceVersion, created.ResourceVersion)
+	}
+
+	cfg.EgressHosts = []string{"b.example"}
+	reconcileOnceWith(t, c, devNS, cfg)
+	updated := egressPolicy(t, c)
+	if len(updated.Spec.Egress) != 2 {
+		t.Fatalf("egress rules = %d, want DNS and one host", len(updated.Spec.Egress))
+	}
+	if got := updated.Spec.Egress[1].To[0].IPBlock.CIDR; got != "b.example" {
+		t.Errorf("replacement host cidr = %q, want b.example", got)
+	}
+	if updated.ResourceVersion == created.ResourceVersion {
+		t.Error("changed hosts did not update policy resourceVersion")
+	}
+}
+
+func TestReconcileNoEgressNetworkPolicyByDefault(t *testing.T) {
+	pen := newPen()
+	cfg := testConfig()
+	cfg.EgressHosts = []string{"llm.example.net"}
+	objs := append([]client.Object{ownedNS(t, devNS), pen}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, cfg)
+	policy := &networkingv1.NetworkPolicy{}
+	err := c.Get(context.Background(), types.NamespacedName{Name: penName + "-egress", Namespace: devNS}, policy)
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("egress policy with spec.egress off: err = %v, want NotFound", err)
+	}
+}
+
+func TestReconcileNoEgressNetworkPolicyWithoutHosts(t *testing.T) {
+	pen := newPen()
+	pen.Spec.Egress = true
+	objs := append([]client.Object{ownedNS(t, devNS), pen}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnce(t, c)
+	policy := &networkingv1.NetworkPolicy{}
+	err := c.Get(context.Background(), types.NamespacedName{Name: penName + "-egress", Namespace: devNS}, policy)
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("egress policy with empty egressHosts: err = %v, want NotFound", err)
+	}
+}
+
+func TestReconcileEgressPolicyDeletedWhenFlagOff(t *testing.T) {
+	pen := newPen()
+	existing := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: penName + "-egress", Namespace: devNS},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{ownerLabel: penName}},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
+		},
+	}
+	cfg := testConfig()
+	cfg.EgressHosts = []string{"llm.example.net"}
+	objs := append([]client.Object{ownedNS(t, devNS), pen, existing}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, cfg)
+	policy := &networkingv1.NetworkPolicy{}
+	err := c.Get(context.Background(), types.NamespacedName{Name: penName + "-egress", Namespace: devNS}, policy)
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("egress policy after spec.egress off: err = %v, want NotFound (deleted)", err)
+	}
+}
+
+func TestReconcileEgressPolicyDeletedWhenHostsEmpty(t *testing.T) {
+	pen := newPen()
+	pen.Spec.Egress = true
+	existing := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: penName + "-egress", Namespace: devNS},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{ownerLabel: penName}},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
+		},
+	}
+	objs := append([]client.Object{ownedNS(t, devNS), pen, existing}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnce(t, c)
+	policy := &networkingv1.NetworkPolicy{}
+	err := c.Get(context.Background(), types.NamespacedName{Name: penName + "-egress", Namespace: devNS}, policy)
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("egress policy after egressHosts emptied: err = %v, want NotFound (deleted)", err)
+	}
+}
+
+func TestReconcileSandboxDeleteRecreatesPod(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "1h"
+	// Create a sandbox that will be deleted
+	sandbox := &v1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "env-" + penName, Namespace: devNS},
+		Spec: v1beta1.SandboxSpec{
+			OperatingMode: v1beta1.SandboxOperatingModeRunning,
+			SandboxBlueprint: v1beta1.SandboxBlueprint{
+				PodTemplate: v1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "env", Image: "old/image:old"}},
+					},
+				},
+			},
+		},
+	}
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+
+	// Delete the sandbox
+	if err := c.Delete(context.Background(), sandbox); err != nil {
+		t.Fatalf("delete sandbox: %v", err)
+	}
+
+	// Reconcile should recreate it
+	reconcileOnce(t, c)
+
+	// Verify sandbox was recreated with home PVC volume
+	newSandbox := &v1beta1.Sandbox{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, newSandbox); err != nil {
+		t.Fatalf("sandbox not recreated: %v", err)
+	}
+
+	// Check that home volume references the home PVC
+	hasHomeVolume := false
+	for _, vol := range newSandbox.Spec.PodTemplate.Spec.Volumes {
+		if vol.Name == "home" && vol.PersistentVolumeClaim != nil && vol.PersistentVolumeClaim.ClaimName == penName+"-home" {
+			hasHomeVolume = true
+			break
+		}
+	}
+	if !hasHomeVolume {
+		t.Error("recreated sandbox missing home PVC volume")
+	}
+
+	// Check that home PVC still exists (wasn't deleted)
+	pvc := &corev1.PersistentVolumeClaim{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: penName + "-home", Namespace: devNS}, pvc); err != nil {
+		t.Errorf("home PVC missing after sandbox recreation: %v", err)
 	}
 }

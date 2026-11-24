@@ -1,8 +1,9 @@
 # Cluster operator write access in THIS developer namespace only.
 # The pipen-operator chart installs the operator once per cluster with
 # cluster-scoped READ-only access to Pens; this Role + its binding grant
-# the per-namespace writes (pod/service/pvc create, configmap/secret read)
-# so the dev chart stays the single place that opens a namespace.
+# the per-namespace writes (sandbox/service/pvc create, network policy
+# management, configmap/secret read) so the dev chart stays the single place
+# that opens a namespace.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -14,15 +15,21 @@ rules:
   - apiGroups: ["pens.pipen.dev"]
     resources: [pens/status]
     verbs: [update]
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: [sandboxes]
+    verbs: [get, list, watch, create, update, patch, delete]
   - apiGroups: [""]
     resources: [pods]
-    verbs: [create, get, list, watch, patch, update, delete]
+    verbs: [get, list, watch]
   - apiGroups: [""]
     resources: [services]
     verbs: [create, get, list, watch, update, delete]
   - apiGroups: [""]
     resources: [persistentvolumeclaims]
     verbs: [create, get, list, watch]
+  - apiGroups: ["networking.k8s.io"]
+    resources: [networkpolicies]
+    verbs: [get, list, watch, create, update, delete]
   # the get rules are scoped to the herdr-dev-<namespace> objects by
   # resourceNames: the operator's existence probe (a direct APIReader) reads
   # exactly those two objects and nothing else
