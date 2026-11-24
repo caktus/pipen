@@ -32,6 +32,8 @@ const (
 	ownerLabel = "herdr.dev/env"
 	// ownerLabelKey is the namespace label a provisioned dev namespace has.
 	ownerLabelKey = "herdr.dev/owner"
+	// effectiveTTLAnnotation records the TTL used for the current shutdown time.
+	effectiveTTLAnnotation = "pipen.dev/effective-ttl"
 
 	requeueCreating = 10 * time.Second
 	requeuePending  = 30 * time.Second
@@ -57,6 +59,8 @@ type Reconciler struct {
 	// Config is the operator config for this reconcile pass; main reads it
 	// fresh (via the API reader) when the ConfigMap changes.
 	Config config.Config
+	// Now returns the current time. Tests use a fixed time for TTL math.
+	Now func() time.Time
 }
 
 // Reconcile brings one Pen's objects up and updates its status.
@@ -72,6 +76,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 }
 
 func (r *Reconciler) reconcilePen(ctx context.Context, pen *v1alpha1.Pen) (ctrl.Result, error) {
+	if r.Now == nil {
+		r.Now = time.Now
+	}
 	devUser, reason := r.namespaceProvisioned(ctx, pen.Namespace)
 	if reason != "" {
 		return r.fail(ctx, pen, reason)
@@ -293,25 +300,9 @@ func (r *Reconciler) ensureSandbox(ctx context.Context, pen *v1alpha1.Pen, image
 			needsUpdate = true
 		}
 
-		// 2. Compute desired lifecycle from TTL
-		var desiredLifecycle v1beta1.Lifecycle
-		ttl := pen.Spec.TTL
-		if ttl == "" {
-			ttl = cfg.DefaultTTL
-		}
-		if ttl != "" {
-			duration, err := time.ParseDuration(ttl)
-			if err != nil {
-				return fmt.Errorf("invalid TTL %q: %w", ttl, err)
-			}
-			shutdownTime := metav1.NewTime(time.Now().Add(duration))
-			retainPolicy := v1beta1.ShutdownPolicyRetain
-			desiredLifecycle.ShutdownTime = &shutdownTime
-			desiredLifecycle.ShutdownPolicy = &retainPolicy
-		}
-
-		// 3. Check if sandbox expired and needs fresh shutdownTime
-		// If sandbox reports Ready=False reason=SandboxExpired while not paused
+		// 2. Reset the shutdown time when the TTL changes or the sandbox expires.
+		ttl := orDefault(pen.Spec.TTL, cfg.DefaultTTL)
+		storedTTL, hasStoredTTL := sandbox.Annotations[effectiveTTLAnnotation]
 		expired := false
 		for _, cond := range sandbox.Status.Conditions {
 			if cond.Type == string(v1beta1.SandboxConditionReady) &&
@@ -322,14 +313,15 @@ func (r *Reconciler) ensureSandbox(ctx context.Context, pen *v1alpha1.Pen, image
 				break
 			}
 		}
-
-		// Update lifecycle if TTL changed or sandbox expired
-		if (sandbox.Spec.ShutdownTime == nil && desiredLifecycle.ShutdownTime != nil) ||
-			(sandbox.Spec.ShutdownTime != nil && desiredLifecycle.ShutdownTime == nil) ||
-			(sandbox.Spec.ShutdownTime != nil && desiredLifecycle.ShutdownTime != nil &&
-				!sandbox.Spec.ShutdownTime.Equal(desiredLifecycle.ShutdownTime)) ||
-			expired {
-			sandbox.Spec.Lifecycle = desiredLifecycle
+		if !hasStoredTTL || storedTTL != ttl || expired {
+			sandbox.Spec.Lifecycle, err = newLifecycle(ttl, r.Now())
+			if err != nil {
+				return err
+			}
+			if sandbox.Annotations == nil {
+				sandbox.Annotations = map[string]string{}
+			}
+			sandbox.Annotations[effectiveTTLAnnotation] = ttl
 			needsUpdate = true
 		}
 
@@ -422,29 +414,18 @@ func (r *Reconciler) ensureSandbox(ctx context.Context, pen *v1alpha1.Pen, image
 		operatingMode = v1beta1.SandboxOperatingModeSuspended
 	}
 
-	// Set lifecycle if TTL is set
-	var lifecycle v1beta1.Lifecycle
-	ttl := pen.Spec.TTL
-	if ttl == "" {
-		ttl = cfg.DefaultTTL
-	}
-	if ttl != "" {
-		// Parse duration and set shutdownTime
-		duration, err := time.ParseDuration(ttl)
-		if err != nil {
-			return fmt.Errorf("invalid TTL %q: %w", ttl, err)
-		}
-		shutdownTime := metav1.NewTime(time.Now().Add(duration))
-		retainPolicy := v1beta1.ShutdownPolicyRetain
-		lifecycle.ShutdownTime = &shutdownTime
-		lifecycle.ShutdownPolicy = &retainPolicy
+	ttl := orDefault(pen.Spec.TTL, cfg.DefaultTTL)
+	lifecycle, err := newLifecycle(ttl, r.Now())
+	if err != nil {
+		return err
 	}
 
 	sandbox = &v1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      key.Name,
-			Namespace: pen.Namespace,
-			Labels:    map[string]string{ownerLabel: pen.Name},
+			Name:        key.Name,
+			Namespace:   pen.Namespace,
+			Labels:      map[string]string{ownerLabel: pen.Name},
+			Annotations: map[string]string{effectiveTTLAnnotation: ttl},
 		},
 		Spec: v1beta1.SandboxSpec{
 			SandboxBlueprint: v1beta1.SandboxBlueprint{
@@ -527,6 +508,20 @@ func orDefault(v, def string) string {
 		return def
 	}
 	return v
+}
+
+// newLifecycle returns a retained Sandbox shutdown time for a nonempty TTL.
+func newLifecycle(ttl string, now time.Time) (v1beta1.Lifecycle, error) {
+	if ttl == "" {
+		return v1beta1.Lifecycle{}, nil
+	}
+	duration, err := time.ParseDuration(ttl)
+	if err != nil {
+		return v1beta1.Lifecycle{}, fmt.Errorf("invalid TTL %q: %w", ttl, err)
+	}
+	shutdownTime := metav1.NewTime(now.Add(duration))
+	retainPolicy := v1beta1.ShutdownPolicyRetain
+	return v1beta1.Lifecycle{ShutdownTime: &shutdownTime, ShutdownPolicy: &retainPolicy}, nil
 }
 
 func strPtr(s string) *string { return &s }

@@ -141,7 +141,12 @@ func reconcileOnceIn(t *testing.T, c client.Client, ns string) reconcile.Result 
 
 func reconcileOnceWith(t *testing.T, c client.Client, ns string, cfg config.Config) reconcile.Result {
 	t.Helper()
-	r := &Reconciler{Client: c, Reader: c, Scheme: testScheme(t), Config: cfg}
+	return reconcileOnceAt(t, c, ns, cfg, time.Date(2026, 11, 24, 8, 0, 0, 0, time.UTC))
+}
+
+func reconcileOnceAt(t *testing.T, c client.Client, ns string, cfg config.Config, now time.Time) reconcile.Result {
+	t.Helper()
+	r := &Reconciler{Client: c, Reader: c, Scheme: testScheme(t), Config: cfg, Now: func() time.Time { return now }}
 	res, err := r.Reconcile(context.Background(),
 		reconcile.Request{NamespacedName: types.NamespacedName{Name: penName, Namespace: ns}})
 	if err != nil {
@@ -826,45 +831,6 @@ func TestReconcileInvalidTTLFails(t *testing.T) {
 	}
 }
 
-// TestReconcileExpiredSandboxGetsFreshShutdownTime tests that an expired
-// sandbox gets a fresh shutdownTime stamped on the next reconcile.
-func TestReconcileExpiredSandboxGetsFreshShutdownTime(t *testing.T) {
-	pen := newPen()
-	pen.Spec.TTL = "1h"
-	pastTime := metav1.NewTime(time.Now().Add(-2 * time.Hour))
-	expiredSandbox := &v1beta1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{Name: "env-" + penName, Namespace: devNS},
-		Spec: v1beta1.SandboxSpec{
-			OperatingMode: v1beta1.SandboxOperatingModeRunning,
-			Lifecycle: v1beta1.Lifecycle{
-				ShutdownTime: &pastTime,
-			},
-		},
-		Status: v1beta1.SandboxStatus{
-			Conditions: []metav1.Condition{{
-				Type:   string(v1beta1.SandboxConditionReady),
-				Status: metav1.ConditionFalse,
-				Reason: v1beta1.SandboxReasonExpired,
-			}},
-		},
-	}
-	objs := append([]client.Object{ownedNS(t, devNS), pen, expiredSandbox}, devObjects(devNS)...)
-	c := newClient(t, objs...)
-	reconcileOnce(t, c)
-
-	sandbox := &v1beta1.Sandbox{}
-	if err := c.Get(context.Background(), types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, sandbox); err != nil {
-		t.Fatal(err)
-	}
-
-	if sandbox.Spec.ShutdownTime == nil {
-		t.Fatal("shutdownTime not set after expired sandbox reconcile")
-	}
-	if sandbox.Spec.ShutdownTime.Time.Before(time.Now()) {
-		t.Errorf("shutdownTime = %v, want fresh time in the future", sandbox.Spec.ShutdownTime)
-	}
-}
-
 // TestReconcileSuspendedSandboxStatus tests that a suspended sandbox
 // reports PhaseSuspended in pen status.
 func TestReconcileSuspendedSandboxStatus(t *testing.T) {
@@ -882,6 +848,156 @@ func TestReconcileSuspendedSandboxStatus(t *testing.T) {
 
 // TestReconcileSandboxDeleteRecreatesPod tests that deleting a sandbox
 // recreates it with the home PVC reattached.
+func TestReconcileSandboxReconcilerErrorFails(t *testing.T) {
+	sandbox := &v1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "env-" + penName, Namespace: devNS},
+		Status: v1beta1.SandboxStatus{Conditions: []metav1.Condition{{
+			Type:    string(v1beta1.SandboxConditionReady),
+			Status:  metav1.ConditionFalse,
+			Reason:  v1beta1.SandboxReasonReconcilerError,
+			Message: "sandbox pod creation failed",
+		}}},
+	}
+	objs := append([]client.Object{ownedNS(t, devNS), newPen(), sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnce(t, c)
+	p := getPen(t, c)
+	if p.Status.Phase != v1alpha1.PhaseFailed {
+		t.Errorf("phase = %q, want Failed", p.Status.Phase)
+	}
+	if p.Status.Message != "sandbox pod creation failed" {
+		t.Errorf("message = %q, want sandbox error", p.Status.Message)
+	}
+}
+
+func TestReconcileUnscheduledSandboxCreates(t *testing.T) {
+	objs := append([]client.Object{ownedNS(t, devNS), newPen(), unscheduledSandbox()}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	res := reconcileOnce(t, c)
+	p := getPen(t, c)
+	if p.Status.Phase != v1alpha1.PhaseCreating {
+		t.Errorf("phase = %q, want Creating", p.Status.Phase)
+	}
+	if p.Status.Message != "0/1 nodes are available" {
+		t.Errorf("message = %q, want scheduler message", p.Status.Message)
+	}
+	if res.RequeueAfter != requeueCreating {
+		t.Errorf("RequeueAfter = %v, want %v", res.RequeueAfter, requeueCreating)
+	}
+}
+
+func TestReconcileTTLUsesFixedClock(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "1h"
+	objs := append([]client.Object{ownedNS(t, devNS), pen}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, testConfig())
+	sandbox := getSandbox(t, c)
+	want := "2026-11-24T09:00:00Z"
+	if got := sandbox.Spec.ShutdownTime.UTC().Format(time.RFC3339); got != want {
+		t.Errorf("shutdownTime = %q, want %q", got, want)
+	}
+	if got := sandbox.Annotations[effectiveTTLAnnotation]; got != "1h" {
+		t.Errorf("effective TTL = %q, want 1h", got)
+	}
+}
+
+func TestReconcileTTLChangeResetsShutdownTime(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "2h"
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 9, 0, 0, 0, time.UTC))
+	sandbox := sandboxWithTTL("1h", &oldTime)
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, testConfig())
+	got := getSandbox(t, c)
+	want := "2026-11-24T10:00:00Z"
+	if got.Spec.ShutdownTime.UTC().Format(time.RFC3339) != want {
+		t.Errorf("shutdownTime = %v, want %s", got.Spec.ShutdownTime, want)
+	}
+	if got.Annotations[effectiveTTLAnnotation] != "2h" {
+		t.Errorf("effective TTL = %q, want 2h", got.Annotations[effectiveTTLAnnotation])
+	}
+}
+
+func TestReconcileUnchangedTTLKeepsShutdownTime(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "1h"
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 9, 0, 0, 0, time.UTC))
+	sandbox := sandboxWithTTL("1h", &oldTime)
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	for i := 0; i < 2; i++ {
+		reconcileOnceAt(t, c, devNS, testConfig(), time.Date(2026, 11, 24, 8+i, 0, 0, 0, time.UTC))
+	}
+	got := getSandbox(t, c)
+	if !got.Spec.ShutdownTime.Equal(&oldTime) {
+		t.Errorf("shutdownTime = %v, want unchanged %v", got.Spec.ShutdownTime, oldTime)
+	}
+	if got.ResourceVersion != sandbox.ResourceVersion {
+		t.Errorf("sandbox updated on unchanged TTL: resourceVersion %q, want %q", got.ResourceVersion, sandbox.ResourceVersion)
+	}
+}
+
+func TestReconcileRemovedTTLClearsLifecycle(t *testing.T) {
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 9, 0, 0, 0, time.UTC))
+	sandbox := sandboxWithTTL("1h", &oldTime)
+	retain := v1beta1.ShutdownPolicyRetain
+	sandbox.Spec.ShutdownPolicy = &retain
+	objs := append([]client.Object{ownedNS(t, devNS), newPen(), sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, testConfig())
+	got := getSandbox(t, c)
+	if got.Spec.ShutdownTime != nil || got.Spec.ShutdownPolicy != nil {
+		t.Errorf("lifecycle = %+v, want empty", got.Spec.Lifecycle)
+	}
+	if got.Annotations[effectiveTTLAnnotation] != "" {
+		t.Errorf("effective TTL = %q, want empty", got.Annotations[effectiveTTLAnnotation])
+	}
+}
+
+func TestReconcileExpiredSandboxResetsShutdownTimeAtFixedClock(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "1h"
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 7, 0, 0, 0, time.UTC))
+	sandbox := sandboxWithTTL("1h", &oldTime)
+	sandbox.Status.Conditions = []metav1.Condition{{
+		Type: string(v1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: v1beta1.SandboxReasonExpired,
+	}}
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, testConfig())
+	got := getSandbox(t, c)
+	want := "2026-11-24T09:00:00Z"
+	if got.Spec.ShutdownTime.UTC().Format(time.RFC3339) != want {
+		t.Errorf("shutdownTime = %v, want %s", got.Spec.ShutdownTime, want)
+	}
+}
+
+func getSandbox(t *testing.T, c client.Client) *v1beta1.Sandbox {
+	t.Helper()
+	sandbox := &v1beta1.Sandbox{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, sandbox); err != nil {
+		t.Fatal(err)
+	}
+	return sandbox
+}
+
+func sandboxWithTTL(ttl string, shutdownTime *metav1.Time) *v1beta1.Sandbox {
+	service := false
+	return &v1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "env-" + penName, Namespace: devNS,
+			Annotations: map[string]string{effectiveTTLAnnotation: ttl},
+		},
+		Spec: v1beta1.SandboxSpec{
+			SandboxBlueprint: v1beta1.SandboxBlueprint{Service: &service},
+			OperatingMode:    v1beta1.SandboxOperatingModeRunning,
+			Lifecycle:        v1beta1.Lifecycle{ShutdownTime: shutdownTime},
+		},
+	}
+}
+
 func TestReconcileSandboxDeleteRecreatesPod(t *testing.T) {
 	pen := newPen()
 	pen.Spec.TTL = "1h"
