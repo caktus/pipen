@@ -560,10 +560,16 @@ jobs:
       - name: Resize the pen with the CLI
         run: |
           # The e2e defaults are 100m / 128Mi / 1Gi (set by the operator
-          # chart install above); the resize doubles all three
-          # The resize needs a StorageClass that allows expansion. The kind
-          # default does not, so the job creates the expandable class and
-          # the chart install above points the operator at it
+          # chart install above); the resize doubles the cpu and memory.
+          # The resize does not change the home size: the kind cluster
+          # provisions through rancher.io/local-path, which does not
+          # implement volume expansion, so a live grow can never finish
+          # in this job. The expansion logic (the SC check, the PVC
+          # patch, the stall timeout) is unit-tested. See the PI-019 To
+          # Do: assert a live grow when CI runs a provisioner that can
+          # expand. The job still creates the expandable class and the
+          # chart install points the operator at it, so the operator
+          # runs against a named StorageClass like a real install
           # Record the pod uid first: the CLI can report Ready before
           # the operator starts the resize (its poll sees the stale
           # status), so the next step waits for a pod with a new uid
@@ -586,7 +592,7 @@ jobs:
           EOF
           PIPEN_CONFIG="$RUNNER_TEMP/pipen-e2e.yaml" \
             python3 cli/pipen.py resize ci-smoke \
-            --cpu 200m --memory 256Mi --size 2Gi --timeout 300
+            --cpu 200m --memory 256Mi --timeout 300
       - name: The resize restarts the pod with the new resources
         run: |
           # The new pod is built from the updated sandbox template, so
@@ -622,18 +628,6 @@ jobs:
             sleep 2
           done
           [ "$phase" = "Ready" ] || { echo "pen phase = $phase, want Ready" >&2; exit 1; }
-      - name: The home PVC grows to the new size
-        run: |
-          # The grow runs in the background: the pen is Ready and the
-          # capacity catches up later, so poll until it matches
-          size=""
-          for i in $(seq 1 30); do
-            size=$(kubectl -n env-ci get pvc ci-smoke-home \
-              -o jsonpath='{.status.capacity.storage}')
-            [ "$size" = "2Gi" ] && break
-            sleep 10
-          done
-          [ "$size" = "2Gi" ] || { echo "pvc capacity = $size, want 2Gi" >&2; exit 1; }
       - name: The marker file survived the resize
         run: |
           # The pause image has no shell, so the check runs in a

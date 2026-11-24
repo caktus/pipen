@@ -1,9 +1,9 @@
 ---
-id: PI-016
+id: PI-019
 github_issue: 19
 github_url: https://github.com/caktus/pipen/issues/19
-last_synced: "2026-11-24T18:18:10.133644+00:00"
-synced_hash: e76942c1409f1ed45089d2ede874f61e6cd6ea9a24ed32e77caff06fc314367f
+last_synced: "2026-11-24T19:18:40.165088+00:00"
+synced_hash: 748e30d527734911cdba46ce9fcc9032a17eb25d880e6488e028f8b44d199eed
 title: Allow resizing an existing pen
 assignee: "@me"
 labels:
@@ -20,6 +20,7 @@ Today the operator is create-or-leave: it never changes an existing pod or PVC, 
 
 - Verify the production Mayastor storage class sets `allowVolumeExpansion: true` (the EKS context is not reachable from the dev box)
 - Add a `pipen resize` command and make the reconciler converge a changed spec
+- Assert a live home PVC grow in the e2e. The kind 0.27 cluster only runs the rancher.io/local-path provisioner, which has no volume expansion, so the e2e resizes cpu and memory only until CI runs a provisioner that can expand
 
 ## AC
 
