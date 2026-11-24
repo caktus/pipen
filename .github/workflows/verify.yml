@@ -745,11 +745,11 @@ jobs:
           [ "$phase" = "Ready" ] || { echo "pen phase = $phase, want Ready" >&2; exit 1; }
       - name: The credentials annotation mounts the secret
         run: |
-          # The secret create and the patch run as the dev token, so they
-          # prove the dev Role grants secret writes and pen updates in the
-          # pen namespace. The annotation change restarts the pod through
-          # the convergence cycle, so the wait below looks for a pod with
-          # a new uid
+          # Both calls run with the dev kubeconfig. The secret create
+          # proves the dev Role's secrets grant. The pen patch proves the
+          # dev Role's pens patch grant. The annotation change restarts
+          # the pod through the convergence cycle, so the wait below
+          # looks for a pod with a new uid
           uid=$(kubectl -n env-ci get pod env-ci-smoke -o jsonpath='{.metadata.uid}')
           [ -n "$uid" ] || { echo "pod env-ci-smoke not found" >&2; exit 1; }
           kubectl --kubeconfig "$DEV_KUBECONFIG" -n env-ci create secret generic \
@@ -832,8 +832,9 @@ jobs:
           [ -n "$shutdown_before_pause" ] \
             || { echo "pen shutdownAt is empty before pause" >&2; exit 1; }
           echo "SHUTDOWN_BEFORE_PAUSE=$shutdown_before_pause" >> "$GITHUB_ENV"
-          # The dev Role grants update but not patch. These admin patches
-          # change the same spec.paused field that the CLI updates.
+          # These patches run with the admin kubeconfig, not the dev
+          # kubeconfig. The dev token can patch pens since 0.7.3, and the
+          # credentials step above uses that grant.
           kubectl -n env-ci patch pen ci-smoke \
             --type merge -p '{"spec":{"paused":true}}'
           phase=""

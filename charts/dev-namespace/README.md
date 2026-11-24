@@ -35,7 +35,8 @@ Or from a repo checkout: `helm install <dev> charts/dev-namespace ...`.
 
 - `Namespace` `<namespacePrefix><dev>` (label `herdr.dev/owner=<dev>`)
 - `ServiceAccount` `deploy`
-- `Role`/`RoleBinding` `deploy`: CRUD on `pens.pipen.dev/pens`, `get` on
+- `Role`/`RoleBinding` `deploy`: CRUD and `patch` on `pens.pipen.dev/pens`,
+  `get` on
   `pens/status`, `get` on `pods`, `get` on `pods/log`, and
   `create, get, update, delete` on `secrets` (the developer's own pen
   credential Secrets) (no pod, Service or PVC create, no pvc delete)
@@ -247,3 +248,11 @@ per-pen credential Secret that the pen's
 per developer, so the token only ever touches its own namespace's
 Secrets. On upgrade, no pen changes. Nothing is created or deleted at
 install time. The upgrade is a plain `helm upgrade`.
+
+## 0.7.3 grants the developer `patch` on pens
+
+The developer Role gains `patch` on `pens`, so the developer can attach
+the `pens.pipen.dev/credentials` annotation to its own pen with
+`kubectl`. The verb is a partial update. It adds no state the token
+cannot already set with `update`. On upgrade, no pen changes. The
+upgrade is a plain `helm upgrade`.
