@@ -298,6 +298,23 @@ jobs:
           sudo install linux-amd64/helm /usr/local/bin/helm
       - name: Create the kind cluster
         run: kind create cluster --name e2e
+      - name: Create the expandable StorageClass
+        run: |
+          # the kind default StorageClass (standard) does not allow volume
+          # expansion, so the pen resize would fail. The operator chart
+          # install below points the operator at this class, and the class
+          # must exist before the pen is created (the PVC is provisioned at
+          # pen create)
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: storage.k8s.io/v1
+          kind: StorageClass
+          metadata:
+            name: expandable
+          provisioner: csi-hostpath-provisioner
+          allowVolumeExpansion: true
+          reclaimPolicy: Delete
+          volumeBindingMode: WaitForFirstConsumer
+          EOF
       - name: Build the operator image
         run: docker build -t pipen-operator:e2e operator/
       - name: Load the operator image into kind
@@ -317,14 +334,17 @@ jobs:
           # serviceAnnotations cannot be cleared with --set or a values file
           # (helm deep-merges maps), so that config is patched to the kind
           # shape after the install. The other chart defaults now match the
-          # plain kind cluster (StorageClass standard, no runtime class,
-          # no node selector).
+          # plain kind cluster (no runtime class, no node selector). The
+          # kind default StorageClass does not allow volume expansion, so
+          # the install points the operator at the expandable class created
+          # above.
           helm install operator charts/pipen-operator \
             --set image=pipen-operator:e2e \
             --set config.image=registry.k8s.io/pause:3.10 \
             --set config.homeSize=1Gi \
             --set config.cpu=100m \
-            --set config.memory=128Mi
+            --set config.memory=128Mi \
+            --set config.storageClass=expandable
           kubectl -n pipen patch configmap pipen-operator-config \
             --type merge -p '{"data":{"serviceAnnotations":"{}"}}'
       - name: The agent-sandbox controller is ready
@@ -537,6 +557,9 @@ jobs:
         run: |
           # The e2e defaults are 100m / 128Mi / 1Gi (set by the operator
           # chart install above); the resize doubles all three
+          # The resize needs a StorageClass that allows expansion. The kind
+          # default does not, so the job creates the expandable class and
+          # the chart install above points the operator at it
           # Record the pod uid first: the CLI can report Ready before
           # the operator starts the resize (its poll sees the stale
           # status), so the next step waits for a pod with a new uid
