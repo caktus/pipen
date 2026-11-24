@@ -36,8 +36,9 @@ Or from a repo checkout: `helm install <dev> charts/dev-namespace ...`.
 - `Namespace` `<namespacePrefix><dev>` (label `herdr.dev/owner=<dev>`)
 - `ServiceAccount` `deploy`
 - `Role`/`RoleBinding` `deploy`: CRUD on `pens.pipen.dev/pens`, `get` on
-  `pens/status`, `get` on `pods`, `get` on `pods/log` (no pod, Service or PVC
-  create, no pvc delete)
+  `pens/status`, `get` on `pods`, `get` on `pods/log`, and
+  `create, get, update, delete` on `secrets` (the developer's own pen
+  credential Secrets) (no pod, Service or PVC create, no pvc delete)
 - `Role`/`RoleBinding` `pipen-operator` (in the same namespace): the
   per-namespace writes for the operator's ServiceAccount (Sandbox, Service,
   PVC, and NetworkPolicy management, pens/status update, pod reads,
@@ -236,3 +237,13 @@ upgrade is a plain `helm upgrade`. You do not need to touch any pen.
 The `DEV_USER` bullet now says the guest unix user is the dev name (the
 `herdr.dev/owner` label value), matching the operator that reads that
 label. No rendered object changed.
+
+## 0.7.2 lets the developer manage credential Secrets
+
+The developer Role gains `create, get, update, delete` on `secrets`
+(namespace-scoped, no `resourceNames`). The developer creates the
+per-pen credential Secret that the pen's
+`pens.pipen.dev/credentials` annotation points at. The namespace is
+per developer, so the token only ever touches its own namespace's
+Secrets. On upgrade, no pen changes. Nothing is created or deleted at
+install time. The upgrade is a plain `helm upgrade`.
