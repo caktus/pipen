@@ -2,13 +2,13 @@
 id: PI-023
 github_issue: 23
 github_url: https://github.com/caktus/pipen/issues/23
-last_synced: "2026-11-24T21:11:14.290644+00:00"
+last_synced: "2026-11-24T21:17:10.080139+00:00"
 synced_hash: 9790d0c751d72ba999fb0748fa51318d58ae4919cdec771dceea1bc0eacd106e
 title: Run pens on systemd for kind
 type: Task
 assignee: "@me"
 labels:
-  - phase/in-progress
+  - phase/done
 context:
   relates_to: []
 ---
