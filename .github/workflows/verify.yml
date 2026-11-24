@@ -290,6 +290,69 @@ jobs:
             || { echo "key ssh landed in $home, want /home/probe" >&2; exit 1; }
           echo "key ssh OK: landed in $home"
           docker stop herdr-probe3 >/dev/null
+      - name: Boot probe with credentials
+        run: |
+          # two boots on one /home volume. Boot 1 projects a credentials
+          # dir with one key: the file lands in ~/.herdr/credentials/
+          # (dir 0700, file 0600 owned by the dev user, content intact) and
+          # leaves a sha256 marker under ~/.herdr/projected-credentials.
+          # Boot 2 projects an empty dir: the placed file and its marker
+          # go (drop-on-delete)
+          work="$RUNNER_TEMP/probe4"
+          mkdir -p "$work/secret" "$work/config" "$work/credentials-full" "$work/credentials-empty"
+          printf 'ssh-ed25519 AAAACIKEY probe\n' > "$work/secret/authorized_keys"
+          printf 'ghp-probe' > "$work/credentials-full/token"
+          docker run -d --name herdr-probe4a --privileged \
+            -e DEV_USER=probe \
+            -v "$work/secret":/run/herdr/secret \
+            -v "$work/config":/run/herdr/config \
+            -v "$work/credentials-full":/run/herdr/credentials \
+            -v herdr-probe4-home:/home \
+            pipen-herdr-dev:ci
+          for i in $(seq 1 60); do
+            docker exec herdr-probe4a pgrep -x sshd >/dev/null 2>&1 && break
+            sleep 2
+          done
+          docker exec herdr-probe4a pgrep -x sshd \
+            || { docker logs herdr-probe4a >&2; echo "boot 1: sshd not running" >&2; exit 1; }
+          [ "$(docker exec herdr-probe4a cat /proc/1/comm)" = "systemd" ] \
+            || { echo "boot 1: PID 1 is not systemd" >&2; exit 1; }
+          docker exec herdr-probe4a test -f /home/probe/.herdr/credentials/token \
+            || { echo "credential file was not placed" >&2; exit 1; }
+          [ "$(docker exec herdr-probe4a stat -c '%a' /home/probe/.herdr/credentials)" = "700" ] \
+            || { echo "credentials dir is not 0700" >&2; exit 1; }
+          [ "$(docker exec herdr-probe4a stat -c '%a' /home/probe/.herdr/credentials/token)" = "600" ] \
+            || { echo "credential file is not 0600" >&2; exit 1; }
+          [ "$(docker exec herdr-probe4a stat -c '%U' /home/probe/.herdr/credentials/token)" = "probe" ] \
+            || { echo "credential file is not owned by the dev user" >&2; exit 1; }
+          [ "$(docker exec herdr-probe4a cat /home/probe/.herdr/credentials/token)" = "ghp-probe" ] \
+            || { echo "credential content does not match" >&2; exit 1; }
+          docker exec herdr-probe4a test -f /home/probe/.herdr/projected-credentials/token.sha256 \
+            || { echo "credentials marker missing" >&2; exit 1; }
+          echo "credentials boot 1 OK"
+          docker stop herdr-probe4a >/dev/null
+          docker run -d --name herdr-probe4b --privileged \
+            -e DEV_USER=probe \
+            -v "$work/secret":/run/herdr/secret \
+            -v "$work/config":/run/herdr/config \
+            -v "$work/credentials-empty":/run/herdr/credentials \
+            -v herdr-probe4-home:/home \
+            pipen-herdr-dev:ci
+          for i in $(seq 1 60); do
+            docker exec herdr-probe4b pgrep -x sshd >/dev/null 2>&1 && break
+            sleep 2
+          done
+          docker exec herdr-probe4b pgrep -x sshd \
+            || { docker logs herdr-probe4b >&2; echo "boot 2: sshd not running" >&2; exit 1; }
+          [ "$(docker exec herdr-probe4b cat /proc/1/comm)" = "systemd" ] \
+            || { echo "boot 2: PID 1 is not systemd" >&2; exit 1; }
+          docker exec herdr-probe4b test ! -e /home/probe/.herdr/credentials/token \
+            || { echo "placed credential survived a key drop" >&2; exit 1; }
+          markers=$(docker exec herdr-probe4b sh -c 'ls /home/probe/.herdr/projected-credentials/*.sha256 2>/dev/null || true')
+          [ -z "$markers" ] \
+            || { echo "credentials markers survived a key drop: $markers" >&2; exit 1; }
+          echo "credentials dropped-key boot OK"
+          docker stop herdr-probe4b >/dev/null
       - name: Build the operator image
         uses: docker/build-push-action@v6
         with:
@@ -303,8 +366,10 @@ jobs:
           # best effort: a probe that failed early leaves no container or
           # volume behind, so ignore the errors
           docker rm -f herdr-probe1 herdr-probe2a herdr-probe2b herdr-probe3 \
+            herdr-probe4a herdr-probe4b \
             >/dev/null 2>&1 || true
           docker volume rm herdr-probe1-home herdr-probe2-home herdr-probe3-home \
+            herdr-probe4-home \
             >/dev/null 2>&1 || true
 
   e2e:
