@@ -13,14 +13,17 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
 
 # dev_packages (git curl build-essential htop docker.io direnv npm unzip) +
-# openssh-server (key-only ssh endpoint) + sudo (the entrypoint grants the
-# dev user passwordless sudo). Unpinned on purpose: a dev toolchain image
-# tracks distro current (hadolint DL3008 suppressed below).
+# openssh-server (key-only ssh endpoint) + sudo (the setup service grants
+# the dev user passwordless sudo) + systemd (PID 1: the pen boots like a
+# small machine — the bootstrap is a oneshot service, dockerd and sshd are
+# services, see pen-setup.service). Unpinned on purpose: a dev toolchain
+# image tracks distro current (hadolint DL3008 suppressed below).
 # hadolint ignore=DL3008
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         git curl build-essential htop docker.io direnv npm unzip \
         openssh-server sudo ca-certificates \
+        systemd systemd-sysv dbus dbus-user-session \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -104,8 +107,30 @@ RUN curl -fsSL https://releases.herdr.dev/app/install.sh | sh \
 # overlayfs snapshotter fails every container start with
 # "mount overlay ... invalid argument". The native snapshotter is
 # directory-based (no mounts), so it works on virtiofs.
+# native.cgroupdriver is pinned to systemd: systemd is PID 1 in the pen,
+# and the systemd driver gives every container its own scope under
+# system.slice with a delegable cgroup v2 tree.
 COPY docker-daemon.json /etc/docker/daemon.json
 COPY entrypoint.sh /usr/local/bin/herdr-entrypoint
-RUN chmod 0755 /usr/local/bin/herdr-entrypoint
+COPY herdr-boot /usr/local/bin/herdr-boot
+COPY herdr-env-import /usr/local/bin/herdr-env-import
+COPY pen-env-import.service /etc/systemd/system/pen-env-import.service
+COPY pen-setup.service /etc/systemd/system/pen-setup.service
+COPY docker.service.d/override.conf /etc/systemd/system/docker.service.d/override.conf
+COPY ssh.service.d/override.conf /etc/systemd/system/ssh.service.d/override.conf
+RUN chmod 0755 /usr/local/bin/herdr-entrypoint /usr/local/bin/herdr-boot /usr/local/bin/herdr-env-import \
+    && ln -sf /dev/null /etc/systemd/system/systemd-modules-load.service \
+    # classic daemon sshd (persistent process), not socket-activated:
+    # the pen is reached over the L4 service and `pgrep -x sshd` is the
+    # health signal
+    && systemctl disable ssh.socket \
+    && systemctl enable ssh.service \
+    && systemctl enable pen-setup.service pen-env-import.service
 
-ENTRYPOINT ["/usr/local/bin/herdr-entrypoint"]
+# herdr-boot runs first: it copies the /run/herdr k8s projections to
+# /var/lib/herdr (systemd's boot remounts /run, orphaning the submounts),
+# then execs systemd. The k8s container env (DEV_USER, TAILNET_HOSTNAME)
+# lands on the systemd process; pen-env-import.service copies it into the
+# manager environment (which systemd passes to every service) before the
+# bootstrap runs — so no dev name is ever baked in.
+ENTRYPOINT ["/usr/local/bin/herdr-boot"]

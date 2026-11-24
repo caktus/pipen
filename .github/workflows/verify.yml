@@ -156,10 +156,15 @@ jobs:
           load: true
           cache-from: type=gha,scope=herdr-image
           cache-to: type=gha,scope=herdr-image,mode=max
+      - name: Build the kind node image
+        run: docker build -t pipen-kind-node:ci kind-node/
       - name: Boot probe with an empty config dir
         run: |
-          # the entrypoint must boot with no model config at all: sshd
-          # runs, the dev user exists, and no config file is placed
+          # the pen must boot with no model config at all: systemd is PID 1,
+          # the setup oneshot creates the dev user from the DEV_USER
+          # container env, sshd runs, dockerd runs as a systemd service with
+          # the systemd cgroup driver (a memory-limited child gets its
+          # limit in its scope), and no config file is placed
           work="$RUNNER_TEMP/probe1"
           mkdir -p "$work/secret" "$work/config"
           printf 'ssh-ed25519 AAAACIKEY probe\n' > "$work/secret/authorized_keys"
@@ -175,12 +180,25 @@ jobs:
           done
           docker exec herdr-probe1 pgrep -x sshd \
             || { docker logs herdr-probe1 >&2; echo "sshd not running" >&2; exit 1; }
+          [ "$(docker exec herdr-probe1 cat /proc/1/comm)" = "systemd" ] \
+            || { echo "PID 1 is not systemd" >&2; exit 1; }
+          [ "$(docker exec herdr-probe1 systemctl is-active pen-setup.service)" = "active" ] \
+            || { docker exec herdr-probe1 journalctl -u pen-setup.service >&2; exit 1; }
+          # dockerd is a systemd service with the pinned systemd cgroup
+          # driver (the cgroup-v2 memory-delegation proof happens in the
+          # kata validation, where the FUSE rootfs makes it non-trivial)
+          for i in $(seq 1 30); do
+            docker exec herdr-probe1 docker info >/dev/null 2>&1 && break
+            sleep 2
+          done
+          docker exec herdr-probe1 docker info | grep -q "Cgroup Driver: systemd" \
+            || { docker exec herdr-probe1 docker info >&2; echo "cgroup driver is not systemd" >&2; exit 1; }
           docker exec herdr-probe1 id probe >/dev/null
           docker exec herdr-probe1 test ! -e /home/probe/.pi/agent \
             || { echo "~/.pi/agent exists with an empty config" >&2; exit 1; }
           docker exec herdr-probe1 test ! -e /home/probe/.litellm_key \
             || { echo "~/.litellm_key exists with an empty config" >&2; exit 1; }
-          echo "empty-config boot OK"
+          echo "empty-config boot OK (systemd)"
           docker stop herdr-probe1 >/dev/null
       - name: Boot probe with a dropped key
         run: |
@@ -205,6 +223,8 @@ jobs:
           done
           docker exec herdr-probe2a pgrep -x sshd \
             || { docker logs herdr-probe2a >&2; echo "boot 1: sshd not running" >&2; exit 1; }
+          [ "$(docker exec herdr-probe2a cat /proc/1/comm)" = "systemd" ] \
+            || { echo "boot 1: PID 1 is not systemd" >&2; exit 1; }
           # the developer writes a settings.json by hand on the /home volume
           docker run --rm --entrypoint sh -v herdr-probe2-home:/home pipen-herdr-dev:ci \
             -c 'mkdir -p /home/probe/.pi/agent && printf dev > /home/probe/.pi/agent/settings.json'
@@ -221,6 +241,8 @@ jobs:
           done
           docker exec herdr-probe2b pgrep -x sshd \
             || { docker logs herdr-probe2b >&2; echo "boot 2: sshd not running" >&2; exit 1; }
+          [ "$(docker exec herdr-probe2b cat /proc/1/comm)" = "systemd" ] \
+            || { echo "boot 2: PID 1 is not systemd" >&2; exit 1; }
           docker exec herdr-probe2b test ! -e /home/probe/.pi/agent/models.json \
             || { echo "placed models.json survived a key drop" >&2; exit 1; }
           docker exec herdr-probe2b test ! -e /home/probe/.litellm_key \
@@ -255,6 +277,8 @@ jobs:
           done
           docker exec herdr-probe3 pgrep -x sshd \
             || { docker logs herdr-probe3 >&2; echo "sshd not running" >&2; exit 1; }
+          [ "$(docker exec herdr-probe3 cat /proc/1/comm)" = "systemd" ] \
+            || { echo "PID 1 is not systemd" >&2; exit 1; }
           if ! home="$(ssh -i "$work/id_probe" -p 2222 \
             -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
             -o BatchMode=yes probe@127.0.0.1 'echo "$HOME"')"; then
@@ -274,6 +298,14 @@ jobs:
           load: true
           cache-from: type=gha,scope=pipen-operator-image
           cache-to: type=gha,scope=pipen-operator-image,mode=max
+      - name: Remove the probe containers and volumes
+        run: |
+          # best effort: a probe that failed early leaves no container or
+          # volume behind, so ignore the errors
+          docker rm -f herdr-probe1 herdr-probe2a herdr-probe2b herdr-probe3 \
+            >/dev/null 2>&1 || true
+          docker volume rm herdr-probe1-home herdr-probe2-home herdr-probe3-home \
+            >/dev/null 2>&1 || true
 
   e2e:
     runs-on: ubuntu-latest

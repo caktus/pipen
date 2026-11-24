@@ -19,7 +19,13 @@ holds the cluster-specific parts: storage nodes, litellm keys, and
 tailnet domain.
 
 - `devenv/` holds the pen definition: the dev image (Dockerfile, entrypoint,
-  docker daemon configuration)
+  systemd units, docker daemon configuration). systemd is PID 1 in the pen
+  (the entrypoint is a oneshot service, dockerd and sshd are services).
+  If `pen-setup` fails, dockerd and sshd still start (the units use `Wants`,
+  so the failure does not stop them). Key login does not work until
+  `pen-setup` is fixed. The journal shows the error
+- `kind-node/` holds the thin derived kind node image for running kind
+  inside a pen (see kind-node/README.md)
 - `operator/` holds the cluster-wide Go operator: the Pen CRD types, the
   reconciler, and its image. It watches Pens and brings each pen's PVC,
   Sandbox and tailnet Service up
@@ -109,7 +115,7 @@ An admin bootstraps you once (see Admins) and gives you the
    pipen resume myenv      # start a paused pen again; the TTL starts fresh
    pipen resize myenv      # change cpu, memory or home size
    pipen ls                # pens: phase, TTL, node, hostname
-   pipen logs myenv        # pod logs (entrypoint + sshd)
+   pipen logs myenv        # pod console logs (journalctl in the pen for service logs)
    pipen down myenv        # deletes the Pen; the Sandbox, pod, Service and egress policy go (when egress is on), the PVC survives
    ```
 

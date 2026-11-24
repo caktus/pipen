@@ -1,0 +1,29 @@
+#!/bin/sh
+# Runs as the image entrypoint, just before PID 1 (systemd) starts.
+#
+# The k8s projections (dev Secret/ConfigMap) are mounted under /run/herdr.
+# But systemd's boot mounts a fresh tmpfs over /run, which orphans those
+# submounts (the kata agent and docker both leave /run a plain directory
+# when the container starts, so systemd always performs this remount).
+# We therefore copy the projections to /var/lib/herdr — readable by the
+# pen-setup.service bootstrap — before systemd takes over.
+#
+# The copy is taken from scratch on every boot (rm -rf first): a
+# restarted container must never serve secret content that was dropped
+# from the projection. Dangling projection entries (a key removed from
+# the Secret/ConfigMap) are skipped, not fatal. The copy lives on the
+# container rootfs only — it is gone with the pod.
+set -eu
+rm -rf /var/lib/herdr
+mkdir -p /var/lib/herdr
+if [ -d /run/herdr ]; then
+    # -xtype f: regular files and symlinks that resolve to one; dangling
+    # projection entries are skipped, not fatal. Filenames are
+    # operator-managed (no newlines), so plain read is safe.
+    find /run/herdr -xtype f | while IFS= read -r f; do
+        rel="${f#/run/herdr/}"
+        mkdir -p "/var/lib/herdr/$(dirname "$rel")"
+        cp "$f" "/var/lib/herdr/$rel"
+    done
+fi
+exec /lib/systemd/systemd
