@@ -1,9 +1,10 @@
 # ns-scoped Role for the per-developer pipen CLI: everything `pipen
-# up/ssh/down/ls/logs` needs, and nothing else. The CLI manages only the
-# Pen CR now — the operator (separate SA, see operator-role.yaml) creates
-# the pod/Service/PVC. Notably NO pvc delete (the admin-only data wipe),
-# NO pod/service create (that is how a dev token could once spawn any
-# privileged pod), no cluster-wide, no cross-ns.
+# up/ssh/down/ls/logs` needs, plus the secrets rule for the developer's
+# kubectl workflow. The CLI manages only the Pen CR; the operator
+# (separate SA, see operator-role.yaml) creates the pod/Service/PVC.
+# Notably NO pvc delete (the admin-only data wipe), NO pod/service
+# create (that is how a dev token could once spawn any privileged pod),
+# no cluster-wide, no cross-ns.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

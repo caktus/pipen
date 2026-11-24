@@ -463,13 +463,13 @@ token.
    ```
 
 3. The operator restarts the pen once to add the volume. After the
-   restart, every key in the Secret lands in the pen at
+   restart, every non-empty key in the Secret lands in the pen at
    `~/.herdr/credentials/<key>`, mode 0600, in a 0700 directory.
 
 4. To rotate a credential, change the Secret and then recreate the pod:
-   `pipen pause <pen>` and `pipen resume <pen>`, or `pipen down <pen>`
-   and `pipen up <pen>`. A changed value reaches the pen at pod
-   recreation, the same contract as the SSH keys.
+   `pipen pause <pen>` and `pipen resume <pen>`. The pause keeps the
+   annotation, so the mount survives. A changed value reaches the pen
+   at pod recreation, the same contract as the SSH keys.
 
 A missing Secret does not fail the pen. It runs without the credential
 files. The ConfigMap path is unchanged for non-sensitive values.
@@ -519,9 +519,9 @@ the actual capacity depends on your StorageClass.
   ServiceAccount token. It turns off TLS certificate verification for that
   hop. The API server certificate carries no tailnet SAN. Token
   authentication over the private tailnet is the documented posture
-- Every verb that the CLI uses is granted by the bootstrap role, and nothing
-  more: the pens CRD, `get` on `pods`, `get` on `pods/log`, and
-  `create, get, update, delete` on `secrets` (the developer's own pen
+- The bootstrap role grants the complete set: the pens CRD, `get` on
+  `pods`, `get` on `pods/log`, and `create, get, update, delete` on
+  `secrets` (for the kubectl steps above, on the developer's own pen
   credential Secrets). That scoping
   works when the cluster runs `--authorization-mode=RBAC`. On an AlwaysAllow
   cluster, the cluster itself is the boundary. In particular, the role for
