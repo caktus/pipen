@@ -260,19 +260,19 @@ Reference configuration (the defaults from earlier versions):
 The chart defaults assume this repo's reference cluster. An external org
 sets these values and nothing else:
 
-| Value                                          | Chart          | Default                                | Meaning                                                |
-| ---------------------------------------------- | -------------- | -------------------------------------- | ------------------------------------------------------ |
-| `image`                                        | pipen-operator | `ghcr.io/caktus/pipen-operator:latest` | the operator image                                     |
-| `config.image`                                 | pipen-operator | `ghcr.io/caktus/pipen:latest`          | the pen pod image                                      |
-| `config.storageClass`                          | pipen-operator | `""`                                   | the home PVC class                                     |
-| `config.nodeSelector`                          | pipen-operator | `{}`                                   | the home volume nodes                                  |
-| `config.runtimeClass`                          | pipen-operator | `""`                                   | empty runs no runtime class                            |
-| `config.loadBalancerClass`                     | pipen-operator | `tailscale`                            | pen Service exposure                                   |
-| `config.serviceAnnotations`                    | pipen-operator | `tailscale.com/expose: "true"`         | pen Service annotations                                |
-| `config.tailnetDomain`                         | pipen-operator | empty                                  | informational, printed hostnames                       |
-| `tailscale.namespace`                          | dev-namespace  | `tailscale`                            | the operator namespace                                 |
-| `egress.podAllows`, `egress.cidrAllows`        | dev-namespace  | empty                                  | in-cluster model endpoints and other egress            |
-| `dev`, `namespacePrefix`, `operator.namespace` | dev-namespace  | required, `env-`, `pipen`              | naming. `dev` is required: the render fails without it |
+| Value                                          | Chart          | Default                                 | Meaning                                                |
+| ---------------------------------------------- | -------------- | --------------------------------------- | ------------------------------------------------------ |
+| `image`                                        | pipen-operator | `ghcr.io/caktus/pipen-operator:latest`  | the operator image                                     |
+| `config.image`                                 | pipen-operator | `ghcr.io/caktus/pipen:20261124-pi1.6.0` | the pen pod image                                      |
+| `config.storageClass`                          | pipen-operator | `""`                                    | the home PVC class                                     |
+| `config.nodeSelector`                          | pipen-operator | `{}`                                    | the home volume nodes                                  |
+| `config.runtimeClass`                          | pipen-operator | `""`                                    | empty runs no runtime class                            |
+| `config.loadBalancerClass`                     | pipen-operator | `tailscale`                             | pen Service exposure                                   |
+| `config.serviceAnnotations`                    | pipen-operator | `tailscale.com/expose: "true"`          | pen Service annotations                                |
+| `config.tailnetDomain`                         | pipen-operator | empty                                   | informational, printed hostnames                       |
+| `tailscale.namespace`                          | dev-namespace  | `tailscale`                             | the operator namespace                                 |
+| `egress.podAllows`, `egress.cidrAllows`        | dev-namespace  | empty                                   | in-cluster model endpoints and other egress            |
+| `dev`, `namespacePrefix`, `operator.namespace` | dev-namespace  | required, `env-`, `pipen`               | naming. `dev` is required: the render fails without it |
 
 The full value lists and defaults live in each chart README.
 
@@ -292,7 +292,8 @@ visibility to **public**. GitHub creates packages pushed this way as private
 by default, and the pen pods pull anonymously.
 
 The pod (created by the operator) pulls `ghcr.io/caktus/pipen` with the
-image from the operator config (default `ghcr.io/caktus/pipen:latest`). The
+image from the operator config (default `ghcr.io/caktus/pipen:20261124-pi1.6.0`,
+a pinned date tag that the chart re-pins per release). The
 operator always pulls `latest` tags and uses `IfNotPresent` for pinned tags.
 There is no in-cluster registry and no image build on a node anymore.
 
@@ -325,8 +326,9 @@ This creates, in namespace `pipen`:
 - The `pens.pipen.dev/v1alpha1` Pen CRD. It is a release-managed resource
   (`templates/crd.yaml`): Helm installs it on Helm 3 and Helm 4 alike, and
   `helm upgrade` keeps it in sync. While v1alpha1 is frozen the rendered
-  manifest never changes, so upgrades are no-ops. Do not remove the CRD
-  from the chart: Helm would delete it
+  manifest never changes, so upgrades are no-ops. The one exception is an
+  additive optional status field: release 0.5.3 adds `status.image`. Do not
+  remove the CRD from the chart: Helm would delete it
 - The agent-sandbox controller in the `agent-sandbox-system` namespace. The
   chart vendors the pinned v1.0.12 release asset. It creates the pen pod
   from each Sandbox. The chart README documents the upgrade path
@@ -488,6 +490,13 @@ namespace: env-<dev> # the composed name, namespacePrefix + dev
 dev_user: <dev> # the bare dev
 token: <sa-token>
 ```
+
+The config also takes an optional `image` key. Write it with the same
+value as the operator chart's `config.image`. With the key, `pipen up`
+makes sure that the default image tag is pinned and warns when it is
+`latest` or has no tag. Without the key and without `--image`, the
+image is the operator default. `pipen up` warns that the CLI cannot
+make sure that it is pinned.
 
 ### Revoke a developer
 

@@ -61,6 +61,28 @@ extensions.
 
 ## Upgrade
 
+### Version 0.5.3
+
+Pens now record their resolved image in `status.image`. The operator
+sets the field on every status write. It carries the image reference
+the operator resolved for the pen. A pen created before a `config.image`
+re-pin keeps its original image in the pod spec.
+
+On upgrade, existing pens gain the field on their next reconcile. The
+upgrade is a plain `helm upgrade`.
+
+### Version 0.5.2
+
+The default pen image `config.image` is now a pinned date tag
+(`ghcr.io/caktus/pipen:20261124-pi1.6.0`) instead of the floating
+`latest` tag. The pin moves when a new pen image lands on main: this
+chart re-pins and releases, and existing installs re-pin on a chart
+upgrade.
+
+On upgrade, existing pens keep their image. The operator resolves the
+image when it creates a pen. The new default applies to pens created
+after the upgrade. The upgrade is a plain `helm upgrade`.
+
 ### Version 0.5.1
 
 The ClusterRole gains `get` on `storageclasses` (group

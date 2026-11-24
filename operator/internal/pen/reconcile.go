@@ -95,6 +95,16 @@ func (r *Reconciler) reconcilePen(ctx context.Context, pen *v1alpha1.Pen) (ctrl.
 	if r.Now == nil {
 		r.Now = time.Now
 	}
+	cfg := r.Config
+	image := pen.Spec.Image
+	if image == "" {
+		image = cfg.Image
+	}
+	// Record the resolved image before the first status write, so every
+	// phase, fail and pending write carries the same reference as the
+	// pod spec.
+	pen.Status.Image = image
+
 	devUser, reason := r.namespaceProvisioned(ctx, pen.Namespace)
 	if reason != "" {
 		return r.fail(ctx, pen, reason)
@@ -107,11 +117,6 @@ func (r *Reconciler) reconcilePen(ctx context.Context, pen *v1alpha1.Pen) (ctrl.
 		return r.pending(ctx, pen, fmt.Sprintf("waiting for Secret herdr-dev-%s (admin bootstrap)", devNS))
 	}
 
-	cfg := r.Config
-	image := pen.Spec.Image
-	if image == "" {
-		image = cfg.Image
-	}
 	homeSize := orDefault(pen.Spec.HomeSize, cfg.HomeSize)
 	cpu := orDefault(pen.Spec.CPU, cfg.CPU)
 	memory := orDefault(pen.Spec.Memory, cfg.Memory)

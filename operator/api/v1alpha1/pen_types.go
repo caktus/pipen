@@ -58,6 +58,10 @@ type PenStatus struct {
 	// Phase is the lifecycle state.
 	// +optional
 	Phase Phase `json:"phase,omitempty"`
+	// Image is the resolved container image, the same reference in the
+	// pod spec; set on every status write.
+	// +optional
+	Image string `json:"image,omitempty"`
 	// Ready is true when ssh via status.hostname works.
 	Ready bool `json:"ready"`
 	// Hostname is the tailnet-assigned hostname (or IP) of the pen.

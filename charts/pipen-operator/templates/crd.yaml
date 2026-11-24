@@ -92,6 +92,11 @@ spec:
                     Hostname is the tailnet-assigned hostname (or IP) of
                     the pen.
                   type: string
+                image:
+                  description: |-
+                    Image is the resolved container image, the same reference in the
+                    pod spec; set on every status write.
+                  type: string
                 message:
                   description:
                     Message carries a human-readable explanation for non-Ready

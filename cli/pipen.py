@@ -262,9 +262,47 @@ def poll_pen(
     return {}  # unreachable
 
 
+def image_tag(image: str) -> str:
+    """The tag of an image reference. Ports the operator's Go rule
+    (operator/internal/pen/reconcile.go, pullPolicy): the tag is the part
+    after the last ':' only when that ':' comes after the last '/', so a
+    registry port (registry:5000/img) is not a tag separator. A reference
+    with no tag is the implicit 'latest'. A digest (@sha256:...) yields the
+    digest part, which is not 'latest' and counts as pinned."""
+    i = image.rfind(":")
+    if i > image.rfind("/"):
+        return image[i + 1 :]
+    return "latest"
+
+
+def up_image_warning(image: str, config_image: str) -> str:
+    """The up warning for a floating image tag, or '' when the image is
+    pinned. `image` is the --image flag value, `config_image` the optional
+    image key from the CLI config ('' means absent). Warning only: the pen
+    is still created."""
+    reference = image or config_image
+    if reference:
+        tag = image_tag(reference)
+        if tag == "latest":
+            return (
+                f"pipen: the image tag {tag!r} is not pinned, so the image "
+                "can change under the pen"
+            )
+        return ""
+    return (
+        "pipen: the image is the operator default and the CLI cannot check "
+        "that it is pinned. Set the image key in the CLI config to enable "
+        "the check."
+    )
+
+
 def cmd_up(args, cfg, api) -> int:
     ns, dev = cfg["namespace"], cfg["dev_user"]
     env = validate_name(resolve_env(args.name, dev))
+
+    warning = up_image_warning(args.image, cfg.get("image") or "")
+    if warning:
+        print(warning, file=sys.stderr)
 
     status, body = api.request(
         "POST",
@@ -488,7 +526,11 @@ def main() -> int:
     p_up.add_argument(
         "--image",
         default="",
-        help="full image reference (default: the operator's configured image, ghcr.io/caktus/pipen:latest)",
+        help=(
+            "full image reference (default: the operator's configured image, "
+            "which the shipped chart sets to the pinned date tag "
+            "ghcr.io/caktus/pipen:20261124-pi1.6.0)"
+        ),
     )
     p_up.add_argument("--size", default="10Gi", help="home PVC size (default: 10Gi)")
     p_up.add_argument("--cpu", default="4", help="cpu request/limit (default: 4)")

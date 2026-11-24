@@ -14,7 +14,9 @@ nodeSelector: {}
 # operator reads (and watches: a change re-reconciles all pens).
 config:
   # Default pod image for pens (Pen spec.image overrides per pen).
-  image: "ghcr.io/caktus/pipen:latest"
+  # A pinned date tag. The chart re-pins this when a new pen image lands
+  # on main and releases.
+  image: "ghcr.io/caktus/pipen:20261124-pi1.6.0"
   # Home PVC size.
   homeSize: "10Gi"
   # Pod cpu request/limit.

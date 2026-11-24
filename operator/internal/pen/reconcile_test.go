@@ -173,6 +173,10 @@ func TestUnprovisionedNamespaceFails(t *testing.T) {
 	if res.RequeueAfter != 0 {
 		t.Errorf("RequeueAfter = %v, want 0 (permanent failure)", res.RequeueAfter)
 	}
+	// A failed pen still records the resolved image.
+	if p.Status.Image != testConfig().Image {
+		t.Errorf("status.image = %q, want %q", p.Status.Image, testConfig().Image)
+	}
 }
 
 // A present-but-empty herdr.dev/owner label is not provisioned: the guest
@@ -428,6 +432,69 @@ func TestReconcileReady(t *testing.T) {
 	if res.RequeueAfter != requeueReady {
 		t.Errorf("RequeueAfter = %v, want %v (periodic refresh keeps status truthful and self-heals)",
 			res.RequeueAfter, requeueReady)
+	}
+}
+
+// A pen with no spec image records the config default in
+// status.image, the same reference the operator puts in the pod spec.
+func TestStatusRecordsDefaultImage(t *testing.T) {
+	objs := append([]client.Object{
+		ownedNS(t, devNS), newPen(), readySandbox(), svcWithIngress("tobias-smoke.ts.example.net", ""),
+	}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnce(t, c)
+	p := getPen(t, c)
+	if p.Status.Image != testConfig().Image {
+		t.Errorf("status.image = %q, want the config default %q", p.Status.Image, testConfig().Image)
+	}
+}
+
+// A pen with a spec image records its own image in status.image, not
+// the config default.
+func TestStatusRecordsOverrideImage(t *testing.T) {
+	pen := newPen()
+	pen.Spec.Image = "example.com/mine:v1"
+	objs := append([]client.Object{
+		ownedNS(t, devNS), pen, readySandbox(), svcWithIngress("tobias-smoke.ts.example.net", ""),
+	}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnce(t, c)
+	p := getPen(t, c)
+	if p.Status.Image != "example.com/mine:v1" {
+		t.Errorf("status.image = %q, want the spec override example.com/mine:v1", p.Status.Image)
+	}
+}
+
+// A pen created before the image recording carries a status without the
+// field, or with an old value. Its next reconcile records the resolved
+// image, the same way the status rewrite tests assert the other fields.
+func TestExistingPenRecordsImageOnNextReconcile(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		image string // the stored status.image before the reconcile
+	}{
+		{name: "status without the field", image: ""},
+		{name: "status with an old value", image: "old/image:oldtag"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pen := newPen()
+			pen.Status = v1alpha1.PenStatus{
+				ObservedGeneration: 1,
+				Phase:              v1alpha1.PhaseReady,
+				Ready:              true,
+				Hostname:           "tobias-smoke.ts.example.net",
+				Image:              tc.image,
+			}
+			objs := append([]client.Object{
+				ownedNS(t, devNS), pen, readySandbox(), svcWithIngress("tobias-smoke.ts.example.net", ""),
+			}, devObjects(devNS)...)
+			c := newClient(t, objs...)
+			reconcileOnce(t, c)
+			p := getPen(t, c)
+			if p.Status.Image != testConfig().Image {
+				t.Errorf("status.image = %q, want the resolved default %q", p.Status.Image, testConfig().Image)
+			}
+		})
 	}
 }
 

@@ -635,6 +635,9 @@ jobs:
           hostname=$(kubectl -n env-ci get pen ci-smoke -o jsonpath='{.status.hostname}')
           [ "$hostname" = "ci-smoke.ts.e2e" ] \
             || { echo "pen hostname = $hostname, want ci-smoke.ts.e2e" >&2; exit 1; }
+          image=$(kubectl -n env-ci get pen ci-smoke -o jsonpath='{.status.image}')
+          [ "$image" = "registry.k8s.io/pause:3.10" ] \
+            || { echo "pen image = $image, want registry.k8s.io/pause:3.10" >&2; exit 1; }
           echo "pen Ready at $hostname"
       - name: Write a resize marker into the home PVC
         run: |

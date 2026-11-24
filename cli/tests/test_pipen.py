@@ -38,10 +38,10 @@ class FakeApi:
         return path if not name else f"{path}/{name}"
 
 
-def run_cli(argv, api):
+def run_cli(argv, api, config=CONFIG):
     with (
         mock.patch.object(sys, "argv", ["pipen"] + argv),
-        mock.patch.object(pipen, "load_config", return_value=CONFIG),
+        mock.patch.object(pipen, "load_config", return_value=config),
         mock.patch.object(pipen, "Api", return_value=api),
     ):
         return pipen.main()
@@ -104,6 +104,24 @@ class LoadConfigTest(unittest.TestCase):
         self.assertEqual(cfg["token"], "abc")
         self.assertNotIn("tailnet_domain", cfg)
 
+    def test_image_key_is_optional(self):
+        cfg = (
+            "api_base: https://api\nnamespace: tobias\ndev_user: tobias\n"
+            "token: abc\nimage: ghcr.io/caktus/pipen:20261124-pi1.6.0\n"
+        )
+        cfg = with_config(cfg, pipen.load_config)
+        self.assertEqual(cfg["image"], "ghcr.io/caktus/pipen:20261124-pi1.6.0")
+
+    def test_config_without_an_image_key(self):
+        cfg = "api_base: https://api\nnamespace: tobias\ndev_user: tobias\ntoken: abc\n"
+        cfg = with_config(cfg, pipen.load_config)
+        self.assertNotIn("image", cfg)
+
+    def test_empty_image_key_reads_as_absent(self):
+        cfg = "api_base: https://api\nnamespace: tobias\ndev_user: tobias\ntoken: abc\nimage:\n"
+        cfg = with_config(cfg, pipen.load_config)
+        self.assertEqual(cfg.get("image") or "", "")
+
 
 class PenSpecTest(unittest.TestCase):
     def test_full_spec(self):
@@ -133,6 +151,66 @@ class PenSpecTest(unittest.TestCase):
         self.assertEqual(body["apiVersion"], "pens.pipen.dev/v1alpha1")
         self.assertEqual(body["metadata"]["name"], "tobias-smoke")
         self.assertEqual(body["metadata"]["namespace"], "tobias")
+
+
+class ImageTagTest(unittest.TestCase):
+    def test_pinned_tag(self):
+        self.assertEqual(
+            pipen.image_tag("ghcr.io/caktus/pipen:20261124-pi1.6.0"),
+            "20261124-pi1.6.0",
+        )
+
+    def test_latest_tag(self):
+        self.assertEqual(pipen.image_tag("ghcr.io/caktus/pipen:latest"), "latest")
+
+    def test_missing_tag_is_the_implicit_latest(self):
+        self.assertEqual(pipen.image_tag("ghcr.io/caktus/pipen"), "latest")
+
+    def test_digest_yields_the_digest_part(self):
+        self.assertEqual(
+            pipen.image_tag("ghcr.io/caktus/pipen@sha256:" + "ab" * 32),
+            "ab" * 32,
+        )
+
+    def test_registry_port_is_not_a_tag_separator(self):
+        self.assertEqual(pipen.image_tag("registry:5000/img"), "latest")
+        self.assertEqual(pipen.image_tag("registry:5000/img:v1"), "v1")
+
+    def test_empty_string_is_the_implicit_latest(self):
+        self.assertEqual(pipen.image_tag(""), "latest")
+
+
+class UpImageWarningTest(unittest.TestCase):
+    def test_explicit_latest_warns(self):
+        warning = pipen.up_image_warning("ghcr.io/caktus/pipen:latest", "")
+        self.assertIn("'latest'", warning)
+
+    def test_explicit_pinned_is_quiet(self):
+        self.assertEqual(
+            pipen.up_image_warning("ghcr.io/caktus/pipen:20261124-pi1.6.0", ""),
+            "",
+        )
+
+    def test_absent_flag_with_config_image_latest_warns(self):
+        warning = pipen.up_image_warning("", "ghcr.io/caktus/pipen:latest")
+        self.assertIn("'latest'", warning)
+
+    def test_absent_flag_with_config_image_pinned_is_quiet(self):
+        self.assertEqual(
+            pipen.up_image_warning("", "ghcr.io/caktus/pipen:20261124-pi1.6.0"),
+            "",
+        )
+
+    def test_absent_flag_without_config_key_warns_about_the_operator_default(self):
+        warning = pipen.up_image_warning("", "")
+        self.assertIn("operator default", warning)
+        self.assertIn("image key", warning)
+
+    def test_digest_is_pinned_and_quiet(self):
+        self.assertEqual(
+            pipen.up_image_warning("ghcr.io/caktus/pipen@sha256:" + "ab" * 32, ""),
+            "",
+        )
 
 
 class UpOptionsTest(unittest.TestCase):
@@ -179,6 +257,93 @@ class UpOptionsTest(unittest.TestCase):
                 },
             },
         )
+
+
+class OrderRecordingApi(FakeApi):
+    """FakeApi that also logs every request into a shared order list."""
+
+    def __init__(self, responses, order):
+        super().__init__(responses)
+        self.order = order
+
+    def request(self, method, path, body=None, stream=False):
+        self.order.append(("request", method))
+        return super().request(method, path, body, stream)
+
+
+class OrderRecordingStderr(io.StringIO):
+    """StringIO that also logs every non-empty write into a shared list."""
+
+    def __init__(self, order):
+        super().__init__()
+        self.order = order
+
+    def write(self, s):
+        if s:
+            self.order.append(("stderr", s))
+        return super().write(s)
+
+
+class UpWarningTest(unittest.TestCase):
+    def run_up(self, argv, config):
+        order = []
+        api = OrderRecordingApi([(201, {}), (200, smoke_pen())], order)
+        err = OrderRecordingStderr(order)
+        with mock.patch.object(sys, "stderr", err):
+            result = run_cli(argv, api, config)
+        return result, api, err, order
+
+    def test_explicit_latest_warns_on_stderr_before_the_post(self):
+        result, api, err, order = self.run_up(
+            ["up", "tobias-smoke", "--image", "ghcr.io/caktus/pipen:latest"],
+            CONFIG,
+        )
+        self.assertEqual(result, 0)
+        self.assertIn("image tag 'latest'", err.getvalue())
+        self.assertIn("can change under the pen", err.getvalue())
+        self.assertEqual(order[0][0], "stderr")
+        self.assertIn(("request", "POST"), order[1:])
+        self.assertIn(("request", "GET"), order[1:])
+
+    def test_explicit_missing_tag_warns_on_stderr_before_the_post(self):
+        result, api, err, order = self.run_up(
+            ["up", "tobias-smoke", "--image", "ghcr.io/caktus/pipen"], CONFIG
+        )
+        self.assertEqual(result, 0)
+        self.assertIn("image tag 'latest'", err.getvalue())
+        self.assertEqual(order[0][0], "stderr")
+        self.assertIn(("request", "POST"), order[1:])
+
+    def test_explicit_pinned_image_prints_no_warning(self):
+        result, api, err, order = self.run_up(
+            ["up", "tobias-smoke", "--image", "ghcr.io/caktus/pipen:20261124-pi1.6.0"],
+            CONFIG,
+        )
+        self.assertEqual(result, 0)
+        self.assertEqual(err.getvalue(), "")
+        self.assertEqual(order[0], ("request", "POST"))
+
+    def test_absent_flag_without_config_key_warns_before_the_post(self):
+        result, api, err, order = self.run_up(["up", "tobias-smoke"], CONFIG)
+        self.assertEqual(result, 0)
+        self.assertIn("operator default", err.getvalue())
+        self.assertIn("image key", err.getvalue())
+        self.assertEqual(order[0][0], "stderr")
+        self.assertIn(("request", "POST"), order[1:])
+
+    def test_absent_flag_with_config_image_latest_warns(self):
+        config = dict(CONFIG, image="ghcr.io/caktus/pipen:latest")
+        result, api, err, order = self.run_up(["up", "tobias-smoke"], config)
+        self.assertEqual(result, 0)
+        self.assertIn("image tag 'latest'", err.getvalue())
+        self.assertEqual(order[0][0], "stderr")
+
+    def test_absent_flag_with_config_image_pinned_is_quiet(self):
+        config = dict(CONFIG, image="ghcr.io/caktus/pipen:20261124-pi1.6.0")
+        result, api, err, order = self.run_up(["up", "tobias-smoke"], config)
+        self.assertEqual(result, 0)
+        self.assertEqual(err.getvalue(), "")
+        self.assertEqual(order[0], ("request", "POST"))
 
 
 class PenStatusTest(unittest.TestCase):
