@@ -164,6 +164,32 @@ func TestFromDataSandboxServiceInvalid(t *testing.T) {
 	}
 }
 
+func TestFromDataEgressHostsDropsTrailingComma(t *testing.T) {
+	cfg, err := FromData(map[string]string{
+		"image":       "ghcr.io/caktus/pipen:latest",
+		"egressHosts": "example.com,",
+	})
+	if err != nil {
+		t.Fatalf("FromData: %v", err)
+	}
+	if len(cfg.EgressHosts) != 1 || cfg.EgressHosts[0] != "example.com" {
+		t.Errorf("EgressHosts = %v, want [\"example.com\"] (blank entries dropped)", cfg.EgressHosts)
+	}
+}
+
+func TestFromDataEgressHostsWhitespaceOnly(t *testing.T) {
+	cfg, err := FromData(map[string]string{
+		"image":       "ghcr.io/caktus/pipen:latest",
+		"egressHosts": "   ",
+	})
+	if err != nil {
+		t.Fatalf("FromData: %v", err)
+	}
+	if len(cfg.EgressHosts) != 0 {
+		t.Errorf("EgressHosts = %v, want empty slice (blank entries dropped)", cfg.EgressHosts)
+	}
+}
+
 func TestFromDataEgressHostsEmptyString(t *testing.T) {
 	cfg, err := FromData(map[string]string{
 		"image":       "ghcr.io/caktus/pipen:latest",

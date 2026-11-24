@@ -99,12 +99,12 @@ func FromData(data map[string]string) (Config, error) {
 			}
 			cfg.SandboxService = b
 		case "egressHosts":
-			if v == "" {
-				cfg.EgressHosts = []string{}
-			} else {
-				cfg.EgressHosts = strings.Split(v, ",")
-				for i, host := range cfg.EgressHosts {
-					cfg.EgressHosts[i] = strings.TrimSpace(host)
+			// Blank entries (trailing commas, whitespace-only values) must
+			// not become empty ipBlock CIDRs in the egress NetworkPolicy.
+			cfg.EgressHosts = []string{}
+			for _, host := range strings.Split(v, ",") {
+				if host = strings.TrimSpace(host); host != "" {
+					cfg.EgressHosts = append(cfg.EgressHosts, host)
 				}
 			}
 		default:

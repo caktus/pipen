@@ -11,6 +11,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -123,6 +124,9 @@ func (r *Reconciler) reconcilePen(ctx context.Context, pen *v1alpha1.Pen) (ctrl.
 		corev1.ResourceMemory: memQty,
 	}
 	if err := r.ensureSandbox(ctx, pen, image, devUser, res, cfg); err != nil {
+		return r.fail(ctx, pen, err.Error())
+	}
+	if err := r.ensureNetworkPolicy(ctx, pen, cfg); err != nil {
 		return r.fail(ctx, pen, err.Error())
 	}
 
@@ -448,6 +452,79 @@ func (r *Reconciler) ensureSandbox(ctx context.Context, pen *v1alpha1.Pen, image
 	}
 	if err := r.Client.Create(ctx, sandbox); err != nil {
 		return fmt.Errorf("create sandbox %s: %w", key.Name, err)
+	}
+	return nil
+}
+
+// ensureNetworkPolicy manages the per-pen egress allow list. It exists
+// only when spec.egress is on and the operator config names hosts. The
+// namespace default-deny-egress stays in place, so this policy can only
+// narrow egress further (policies intersect).
+func (r *Reconciler) ensureNetworkPolicy(ctx context.Context, pen *v1alpha1.Pen, cfg config.Config) error {
+	key := types.NamespacedName{Name: pen.Name + "-egress", Namespace: pen.Namespace}
+	policy := &networkingv1.NetworkPolicy{}
+	err := r.Reader.Get(ctx, key, policy)
+	exists := err == nil
+	if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	if !pen.Spec.Egress || len(cfg.EgressHosts) == 0 {
+		if exists {
+			if err := r.Client.Delete(ctx, policy); err != nil && !apierrors.IsNotFound(err) {
+				return fmt.Errorf("delete egress network policy %s: %w", key.Name, err)
+			}
+		}
+		return nil
+	}
+	if exists {
+		return nil // create-or-leave
+	}
+
+	dnsPort := intstr.FromInt32(53)
+	tcp := corev1.ProtocolTCP
+	udp := corev1.ProtocolUDP
+	// The DNS rule mirrors the dev-namespace chart: kube-dns in kube-system
+	// on port 53, TCP and UDP.
+	rules := []networkingv1.NetworkPolicyEgressRule{
+		{
+			To: []networkingv1.NetworkPolicyPeer{{
+				NamespaceSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"kubernetes.io/metadata.name": "kube-system"},
+				},
+				PodSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"k8s-app": "kube-dns"},
+				},
+			}},
+			Ports: []networkingv1.NetworkPolicyPort{
+				{Protocol: &tcp, Port: &dnsPort},
+				{Protocol: &udp, Port: &dnsPort},
+			},
+		},
+	}
+	for _, host := range cfg.EgressHosts {
+		rules = append(rules, networkingv1.NetworkPolicyEgressRule{
+			To: []networkingv1.NetworkPolicyPeer{{
+				IPBlock: &networkingv1.IPBlock{CIDR: host},
+			}},
+		})
+	}
+	policy = &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      key.Name,
+			Namespace: pen.Namespace,
+			Labels:    map[string]string{ownerLabel: pen.Name},
+		},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{ownerLabel: pen.Name}},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
+			Egress:      rules,
+		},
+	}
+	if err := controllerutil.SetControllerReference(pen, policy, r.Scheme); err != nil {
+		return err
+	}
+	if err := r.Client.Create(ctx, policy); err != nil {
+		return fmt.Errorf("create egress network policy %s: %w", key.Name, err)
 	}
 	return nil
 }

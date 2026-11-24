@@ -8,6 +8,8 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -995,6 +997,154 @@ func sandboxWithTTL(ttl string, shutdownTime *metav1.Time) *v1beta1.Sandbox {
 			OperatingMode:    v1beta1.SandboxOperatingModeRunning,
 			Lifecycle:        v1beta1.Lifecycle{ShutdownTime: shutdownTime},
 		},
+	}
+}
+
+func egressPolicy(t *testing.T, c client.Client) *networkingv1.NetworkPolicy {
+	t.Helper()
+	policy := &networkingv1.NetworkPolicy{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: penName + "-egress", Namespace: devNS}, policy); err != nil {
+		t.Fatalf("egress NetworkPolicy not created: %v", err)
+	}
+	return policy
+}
+
+// A pen with spec.egress and configured hosts gets an egress policy that
+// selects its pod, allows only DNS and the configured hosts, and is owned
+// by the Pen.
+func TestReconcileEgressNetworkPolicy(t *testing.T) {
+	pen := newPen()
+	pen.Spec.Egress = true
+	cfg := testConfig()
+	cfg.EgressHosts = []string{"llm.example.net", "proxy.golang.org"}
+	objs := append([]client.Object{ownedNS(t, devNS), pen}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, cfg)
+
+	policy := egressPolicy(t, c)
+	if len(policy.OwnerReferences) != 1 || policy.OwnerReferences[0].Kind != "Pen" || policy.OwnerReferences[0].Name != penName {
+		t.Errorf("ownerRefs = %+v, want one Pen controller ref", policy.OwnerReferences)
+	}
+	if policy.OwnerReferences[0].Controller == nil || !*policy.OwnerReferences[0].Controller {
+		t.Error("ownerRef is not a controller ref")
+	}
+	if got := policy.Spec.PodSelector.MatchLabels; got[ownerLabel] != penName || len(got) != 1 {
+		t.Errorf("podSelector = %v, want %s=%s only", got, ownerLabel, penName)
+	}
+	if len(policy.Spec.PolicyTypes) != 1 || policy.Spec.PolicyTypes[0] != networkingv1.PolicyTypeEgress {
+		t.Errorf("policyTypes = %v, want [Egress]", policy.Spec.PolicyTypes)
+	}
+	if len(policy.Spec.Egress) != 3 {
+		t.Fatalf("egress rules = %d, want 3 (DNS + 2 hosts)", len(policy.Spec.Egress))
+	}
+
+	// Rule 1 is the kube-dns rule from the dev-namespace chart.
+	dns := policy.Spec.Egress[0]
+	if len(dns.To) != 1 {
+		t.Fatalf("DNS rule peers = %d, want 1", len(dns.To))
+	}
+	peer := dns.To[0]
+	if peer.IPBlock != nil {
+		t.Error("DNS rule must select kube-dns pods, not an ipBlock")
+	}
+	if peer.NamespaceSelector == nil || peer.NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] != "kube-system" {
+		t.Errorf("DNS namespaceSelector = %v, want kubernetes.io/metadata.name=kube-system", peer.NamespaceSelector)
+	}
+	if peer.PodSelector == nil || peer.PodSelector.MatchLabels["k8s-app"] != "kube-dns" {
+		t.Errorf("DNS podSelector = %v, want k8s-app=kube-dns", peer.PodSelector)
+	}
+	if len(dns.Ports) != 2 {
+		t.Fatalf("DNS ports = %d, want 2 (TCP and UDP 53)", len(dns.Ports))
+	}
+	for i, protocol := range []corev1.Protocol{corev1.ProtocolTCP, corev1.ProtocolUDP} {
+		if dns.Ports[i].Protocol == nil || *dns.Ports[i].Protocol != protocol {
+			t.Errorf("DNS port %d protocol = %v, want %s", i, dns.Ports[i].Protocol, protocol)
+		}
+		if dns.Ports[i].Port == nil || dns.Ports[i].Port.IntValue() != 53 {
+			t.Errorf("DNS port %d = %v, want 53", i, dns.Ports[i].Port)
+		}
+	}
+
+	// One ipBlock rule per configured host, in config order.
+	for i, host := range []string{"llm.example.net", "proxy.golang.org"} {
+		rule := policy.Spec.Egress[i+1]
+		if len(rule.To) != 1 || rule.To[0].IPBlock == nil {
+			t.Fatalf("rule %d = %+v, want one ipBlock peer", i+1, rule)
+		}
+		if rule.To[0].IPBlock.CIDR != host {
+			t.Errorf("rule %d cidr = %q, want %q", i+1, rule.To[0].IPBlock.CIDR, host)
+		}
+		if len(rule.Ports) != 0 {
+			t.Errorf("rule %d ports = %v, want all ports", i+1, rule.Ports)
+		}
+	}
+}
+
+func TestReconcileNoEgressNetworkPolicyByDefault(t *testing.T) {
+	pen := newPen()
+	cfg := testConfig()
+	cfg.EgressHosts = []string{"llm.example.net"}
+	objs := append([]client.Object{ownedNS(t, devNS), pen}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, cfg)
+	policy := &networkingv1.NetworkPolicy{}
+	err := c.Get(context.Background(), types.NamespacedName{Name: penName + "-egress", Namespace: devNS}, policy)
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("egress policy with spec.egress off: err = %v, want NotFound", err)
+	}
+}
+
+func TestReconcileNoEgressNetworkPolicyWithoutHosts(t *testing.T) {
+	pen := newPen()
+	pen.Spec.Egress = true
+	objs := append([]client.Object{ownedNS(t, devNS), pen}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnce(t, c)
+	policy := &networkingv1.NetworkPolicy{}
+	err := c.Get(context.Background(), types.NamespacedName{Name: penName + "-egress", Namespace: devNS}, policy)
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("egress policy with empty egressHosts: err = %v, want NotFound", err)
+	}
+}
+
+func TestReconcileEgressPolicyDeletedWhenFlagOff(t *testing.T) {
+	pen := newPen()
+	existing := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: penName + "-egress", Namespace: devNS},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{ownerLabel: penName}},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
+		},
+	}
+	cfg := testConfig()
+	cfg.EgressHosts = []string{"llm.example.net"}
+	objs := append([]client.Object{ownedNS(t, devNS), pen, existing}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, cfg)
+	policy := &networkingv1.NetworkPolicy{}
+	err := c.Get(context.Background(), types.NamespacedName{Name: penName + "-egress", Namespace: devNS}, policy)
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("egress policy after spec.egress off: err = %v, want NotFound (deleted)", err)
+	}
+}
+
+func TestReconcileEgressPolicyDeletedWhenHostsEmpty(t *testing.T) {
+	pen := newPen()
+	pen.Spec.Egress = true
+	existing := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: penName + "-egress", Namespace: devNS},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{ownerLabel: penName}},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
+		},
+	}
+	objs := append([]client.Object{ownedNS(t, devNS), pen, existing}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnce(t, c)
+	policy := &networkingv1.NetworkPolicy{}
+	err := c.Get(context.Background(), types.NamespacedName{Name: penName + "-egress", Namespace: devNS}, policy)
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("egress policy after egressHosts emptied: err = %v, want NotFound (deleted)", err)
 	}
 }
 
