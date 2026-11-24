@@ -1080,6 +1080,41 @@ func TestReconcileEgressNetworkPolicy(t *testing.T) {
 	}
 }
 
+// A changed host list must replace the old allow rules. An unchanged list
+// must not update the policy again.
+func TestReconcileEgressPolicyConvergesHostChanges(t *testing.T) {
+	pen := newPen()
+	pen.Spec.Egress = true
+	cfg := testConfig()
+	cfg.EgressHosts = []string{"a.example"}
+	objs := append([]client.Object{ownedNS(t, devNS), pen}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, cfg)
+
+	created := egressPolicy(t, c)
+	if got := created.Spec.Egress[1].To[0].IPBlock.CIDR; got != "a.example" {
+		t.Fatalf("initial host cidr = %q, want a.example", got)
+	}
+	reconcileOnceWith(t, c, devNS, cfg)
+	stable := egressPolicy(t, c)
+	if stable.ResourceVersion != created.ResourceVersion {
+		t.Errorf("unchanged hosts updated policy: resourceVersion %q, want %q", stable.ResourceVersion, created.ResourceVersion)
+	}
+
+	cfg.EgressHosts = []string{"b.example"}
+	reconcileOnceWith(t, c, devNS, cfg)
+	updated := egressPolicy(t, c)
+	if len(updated.Spec.Egress) != 2 {
+		t.Fatalf("egress rules = %d, want DNS and one host", len(updated.Spec.Egress))
+	}
+	if got := updated.Spec.Egress[1].To[0].IPBlock.CIDR; got != "b.example" {
+		t.Errorf("replacement host cidr = %q, want b.example", got)
+	}
+	if updated.ResourceVersion == created.ResourceVersion {
+		t.Error("changed hosts did not update policy resourceVersion")
+	}
+}
+
 func TestReconcileNoEgressNetworkPolicyByDefault(t *testing.T) {
 	pen := newPen()
 	cfg := testConfig()

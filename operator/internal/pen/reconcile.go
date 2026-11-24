@@ -7,6 +7,7 @@ package pen
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -476,9 +477,6 @@ func (r *Reconciler) ensureNetworkPolicy(ctx context.Context, pen *v1alpha1.Pen,
 		}
 		return nil
 	}
-	if exists {
-		return nil // create-or-leave
-	}
 
 	dnsPort := intstr.FromInt32(53)
 	tcp := corev1.ProtocolTCP
@@ -508,7 +506,7 @@ func (r *Reconciler) ensureNetworkPolicy(ctx context.Context, pen *v1alpha1.Pen,
 			}},
 		})
 	}
-	policy = &networkingv1.NetworkPolicy{
+	desired := &networkingv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      key.Name,
 			Namespace: pen.Namespace,
@@ -520,10 +518,21 @@ func (r *Reconciler) ensureNetworkPolicy(ctx context.Context, pen *v1alpha1.Pen,
 			Egress:      rules,
 		},
 	}
-	if err := controllerutil.SetControllerReference(pen, policy, r.Scheme); err != nil {
+	if exists {
+		if reflect.DeepEqual(policy.Labels, desired.Labels) && reflect.DeepEqual(policy.Spec, desired.Spec) {
+			return nil
+		}
+		policy.Labels = desired.Labels
+		policy.Spec = desired.Spec
+		if err := r.Client.Update(ctx, policy); err != nil {
+			return fmt.Errorf("update egress network policy %s: %w", key.Name, err)
+		}
+		return nil
+	}
+	if err := controllerutil.SetControllerReference(pen, desired, r.Scheme); err != nil {
 		return err
 	}
-	if err := r.Client.Create(ctx, policy); err != nil {
+	if err := r.Client.Create(ctx, desired); err != nil {
 		return fmt.Errorf("create egress network policy %s: %w", key.Name, err)
 	}
 	return nil
