@@ -814,7 +814,6 @@ func TestReconcilePenTTLOverridesDefault(t *testing.T) {
 	if sandbox.Spec.ShutdownTime == nil {
 		t.Error("shutdownTime not set")
 	}
-	// Note: can't verify exact duration in unit test without mocking time
 }
 
 // TestReconcileInvalidTTLFails tests invalid TTL duration fails.
@@ -848,8 +847,8 @@ func TestReconcileSuspendedSandboxStatus(t *testing.T) {
 	}
 }
 
-// TestReconcileSandboxDeleteRecreatesPod tests that deleting a sandbox
-// recreates it with the home PVC reattached.
+// TestReconcileSandboxReconcilerErrorFails tests that a sandbox
+// ReconcilerError condition fails the pen with the sandbox message.
 func TestReconcileSandboxReconcilerErrorFails(t *testing.T) {
 	sandbox := &v1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "env-" + penName, Namespace: devNS},
@@ -868,6 +867,30 @@ func TestReconcileSandboxReconcilerErrorFails(t *testing.T) {
 		t.Errorf("phase = %q, want Failed", p.Status.Phase)
 	}
 	if p.Status.Message != "sandbox pod creation failed" {
+		t.Errorf("message = %q, want sandbox error", p.Status.Message)
+	}
+}
+
+// TestReconcileSandboxInvalidConfigurationFails tests that the permanent
+// InvalidConfiguration reason fails the pen (no retry loop).
+func TestReconcileSandboxInvalidConfigurationFails(t *testing.T) {
+	sandbox := &v1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "env-" + penName, Namespace: devNS},
+		Status: v1beta1.SandboxStatus{Conditions: []metav1.Condition{{
+			Type:    string(v1beta1.SandboxConditionReady),
+			Status:  metav1.ConditionFalse,
+			Reason:  v1beta1.SandboxReasonInvalidConfiguration,
+			Message: "invalid pod template",
+		}}},
+	}
+	objs := append([]client.Object{ownedNS(t, devNS), newPen(), sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnce(t, c)
+	p := getPen(t, c)
+	if p.Status.Phase != v1alpha1.PhaseFailed {
+		t.Errorf("phase = %q, want Failed", p.Status.Phase)
+	}
+	if p.Status.Message != "invalid pod template" {
 		t.Errorf("message = %q, want sandbox error", p.Status.Message)
 	}
 }
@@ -1036,7 +1059,7 @@ func getSandbox(t *testing.T, c client.Client) *v1beta1.Sandbox {
 	return sandbox
 }
 
-// suspendedSandboxWithTTL is a paused sandbox: operatingMode Suspended,
+// suspendedSandboxWithTTL is a suspended sandbox: operatingMode Suspended,
 // an existing shutdownTime, and the stored effective TTL annotation.
 func suspendedSandboxWithTTL(ttl string, shutdownTime *metav1.Time) *v1beta1.Sandbox {
 	sb := sandboxWithTTL(ttl, shutdownTime)

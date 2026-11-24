@@ -29,6 +29,8 @@ import (
 	v1alpha1 "github.com/caktus/pipen/operator/api/v1alpha1"
 	"github.com/caktus/pipen/operator/internal/config"
 	"github.com/caktus/pipen/operator/internal/pen"
+
+	v1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 )
 
 func main() {
@@ -40,11 +42,8 @@ func main() {
 		opNamespace = "pipen"
 	}
 
-	scheme := runtime.NewScheme()
-	if err := clientgoscheme.AddToScheme(scheme); err != nil {
-		fatal(err)
-	}
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
+	scheme, err := newScheme()
+	if err != nil {
 		fatal(err)
 	}
 
@@ -116,6 +115,23 @@ func main() {
 	if err := mgr.Start(ctx); err != nil {
 		fatal(err)
 	}
+}
+
+// newScheme builds the manager scheme: core Kubernetes types, the
+// pens.pipen.dev Pen and the agent-sandbox Sandbox (the reconciler reads
+// and writes Sandboxes directly).
+func newScheme() (*runtime.Scheme, error) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		return nil, err
+	}
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		return nil, err
+	}
+	if err := v1beta1.AddToScheme(scheme); err != nil {
+		return nil, err
+	}
+	return scheme, nil
 }
 
 // crdGroupAvailable reports whether the pens.pipen.dev API group is served

@@ -78,6 +78,11 @@ Upgrade an existing cluster in this order:
    access.
 2. Upgrade the `pipen-operator` release to 0.5.0 or later. This installs
    the agent-sandbox controller and starts the new operator.
+3. For each existing pen, delete the pre-upgrade pod so the sandbox
+   controller can create its replacement: `kubectl -n <namespace> delete
+pod env-<pen>` (or run `pipen down <pen>` and `pipen up <pen>` again).
+   Until then the pen shows Failed: its pod is owned by the Pen, not by
+   the new Sandbox. Data in the home PVC is not touched.
 
 The first step creates a short failure window until the second step
 finishes. The old operator cannot create or delete pods. Existing pens can

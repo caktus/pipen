@@ -1,7 +1,8 @@
-// Package pen reconciles Pen objects: it brings the home PVC, the kata pod
-// and the tailnet-exposed Service up and reports the result on Pen status.
-// Reconcile is create-or-leave: specs of existing objects are never
-// mutated, and the PVC is never deleted by the operator.
+// Package pen reconciles Pen objects. For each Pen it ensures the home
+// PVC, the Sandbox and the tailnet-exposed Service, and reports the
+// result on Pen status. Reconcile converges the Sandbox (operatingMode,
+// shutdownTime, service) and the egress NetworkPolicy. The PVC is never
+// deleted by the operator.
 package pen
 
 import (
@@ -40,8 +41,9 @@ const (
 	requeueCreating = 10 * time.Second
 	requeuePending  = 30 * time.Second
 	// requeueReady keeps a Ready pen periodically reconciled: status stays
-	// truthful (hostname changes, node moves) and a deleted pod/Service is
-	// recreated by the next pass (create-or-leave still applies).
+	// truthful (hostname changes, node moves) and a deleted Service is
+	// recreated by the next pass. The sandbox controller recreates the
+	// pod from the stored podTemplate.
 	requeueReady = 30 * time.Second
 )
 
@@ -170,6 +172,10 @@ func (r *Reconciler) reconcilePen(ctx context.Context, pen *v1alpha1.Pen) (ctrl.
 				// Expired sandbox is not ready
 				return r.status(ctx, pen, v1alpha1.PhaseCreating, false, "", "", "sandbox expired, will resume on next reconcile")
 			} else if cond.Reason == v1beta1.SandboxReasonReconcilerError {
+				return r.fail(ctx, pen, cond.Message)
+			} else if cond.Reason == v1beta1.SandboxReasonInvalidConfiguration {
+				// Permanent (bad podTemplate): retrying cannot fix it, so
+				// the pen fails instead of looping on Creating.
 				return r.fail(ctx, pen, cond.Message)
 			} else {
 				// DependenciesNotReady or other reasons
@@ -643,25 +649,4 @@ func pullPolicy(image, cfg string) corev1.PullPolicy {
 		return corev1.PullAlways
 	}
 	return corev1.PullPolicy(cfg)
-}
-
-func podReady(pod *corev1.Pod) bool {
-	if pod.Status.Phase != corev1.PodRunning {
-		return false
-	}
-	cs := pod.Status.ContainerStatuses
-	if len(cs) == 0 {
-		return false
-	}
-	return cs[0].Ready
-}
-
-func podProgress(pod *corev1.Pod) string {
-	phase := string(pod.Status.Phase)
-	if cs := pod.Status.ContainerStatuses; len(cs) > 0 {
-		if w := cs[0].State.Waiting; w != nil {
-			phase = phase + ": " + w.Reason
-		}
-	}
-	return string(phase)
 }

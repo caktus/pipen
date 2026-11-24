@@ -103,7 +103,7 @@ An admin bootstraps you once (see Admins) and gives you the
    pipen resume myenv      # start a paused pen again; the TTL starts fresh
    pipen ls                # pens: phase, TTL, node, hostname
    pipen logs myenv        # pod logs (entrypoint + sshd)
-   pipen down myenv        # deletes the Pen; the Sandbox, pod, Service and egress policy go, the PVC survives
+   pipen down myenv        # deletes the Pen; the Sandbox, pod, Service and egress policy go (when egress is on), the PVC survives
    ```
 
    The pen starts on the operator's default image (see Admins). To pin
