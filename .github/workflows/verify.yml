@@ -101,8 +101,10 @@ jobs:
           import sys, yaml
           docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
           kinds = [d["kind"] for d in docs]
-          assert len(docs) == 9, f"expected 9 manifests, got {len(docs)}"
-          assert "CustomResourceDefinition" in kinds, "CRD missing from the render"
+          assert len(docs) == 16, f"expected 16 manifests, got {len(docs)}"
+          crds = [d["metadata"]["name"] for d in docs if d["kind"] == "CustomResourceDefinition"]
+          assert "pens.pens.pipen.dev" in crds, "pen CRD missing from the render"
+          assert "sandboxes.agents.x-k8s.io" in crds, "agent-sandbox CRD missing from the render"
           print(f"{len(docs)} manifests OK: " + ", ".join(kinds))
           '
 

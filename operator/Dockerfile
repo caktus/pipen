@@ -3,7 +3,7 @@
 # the pipen-operator-config ConfigMap at runtime.
 
 # hadolint ignore=DL3007
-FROM golang:1.24 AS build
+FROM golang:1.26 AS build
 WORKDIR /src
 
 # hadolint ignore=DL3018
