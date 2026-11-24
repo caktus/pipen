@@ -2,13 +2,13 @@
 id: PI-020
 github_issue: 18
 github_url: https://github.com/caktus/pipen/issues/18
-last_synced: "2026-11-24T05:35:58.538987+00:00"
+last_synced: "2026-11-24T15:48:20.230727+00:00"
 synced_hash: a61ed8cd1bef137859b44287a7f5f84b4abad0d45130aa03c3c197078d15bf66
 title: Reconcile pens as agent-sandbox Sandbox resources
 type: Feature
 assignee: "@me"
 labels:
-  - phase/in-progress
+  - phase/review
 context:
   relates_to: []
 ---
