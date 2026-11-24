@@ -301,16 +301,20 @@ jobs:
       - name: Create the expandable StorageClass
         run: |
           # the kind default StorageClass (standard) does not allow volume
-          # expansion, so the pen resize would fail. The operator chart
-          # install below points the operator at this class, and the class
-          # must exist before the pen is created (the PVC is provisioned at
-          # pen create)
-          cat <<'EOF' | kubectl apply -f -
+          # expansion, so the pen resize would fail. The job clones the
+          # working provisioner of the default class into a class that does
+          # allow it, so the provisioner name is read at runtime instead of
+          # hardcoded. The class must exist before the pen is created (the
+          # PVC is provisioned at pen create). The operator chart install
+          # below points the operator at this class
+          provisioner=$(kubectl get sc standard -o jsonpath='{.provisioner}')
+          [ -n "$provisioner" ] || { echo "no provisioner on the default StorageClass" >&2; exit 1; }
+          cat <<EOF | kubectl apply -f -
           apiVersion: storage.k8s.io/v1
           kind: StorageClass
           metadata:
             name: expandable
-          provisioner: csi-hostpath-provisioner
+          provisioner: $provisioner
           allowVolumeExpansion: true
           reclaimPolicy: Delete
           volumeBindingMode: WaitForFirstConsumer
