@@ -39,9 +39,9 @@ Or from a repo checkout: `helm install <dev> charts/dev-namespace ...`.
   `pens/status`, `get` on `pods`, `get` on `pods/log` (no pod, Service or PVC
   create, no pvc delete)
 - `Role`/`RoleBinding` `pipen-operator` (in the same namespace): the
-  per-namespace writes for the operator's ServiceAccount (pods, services, pvc
-  create, pens/status update, configmap/secret get limited to the
-  `herdr-dev-<namespace>` objects, plus reads on all of them)
+  per-namespace writes for the operator's ServiceAccount (Sandbox, Service,
+  PVC, and NetworkPolicy management, pens/status update, pod reads,
+  configmap/secret get limited to the `herdr-dev-<namespace>` objects)
 - `Secret` `deploy-token` (`kubernetes.io/service-account-token`); the token
   controller fills `data.token` after a delay
 - `Secret` `herdr-dev-<namespace>`: the ssh public keys
@@ -189,6 +189,47 @@ pod labels on your cluster against this rule:
 kubectl -n <tailscale namespace> get pods \
   -l tailscale.com/parent-resource-type --show-labels
 ```
+
+## 0.7.0 grants Sandbox and NetworkPolicy access
+
+The operator now reconciles each pen as an agent-sandbox Sandbox. Its Role
+can manage `sandboxes.agents.x-k8s.io` and `networkpolicies`. The pod rule
+now allows only `get`, `list`, and `watch`. The operator needs pod reads
+for pen status. The developer token reads logs. The agent-sandbox controller
+creates and deletes the pods.
+
+The developer Role does not change. It keeps `get` on `pods` and `pods/log`.
+
+Upgrade an existing cluster in this order:
+
+1. Upgrade every `dev-namespace` release to 0.7.0 or later.
+2. Upgrade the `pipen-operator` release to 0.5.0 or later. It installs the
+   agent-sandbox controller in `agent-sandbox-system` and starts the new
+   operator.
+3. For each existing pen, delete the pre-upgrade pod so the sandbox
+   controller can create its replacement: `kubectl -n <namespace> delete
+pod env-<pen>` (or run `pipen down <pen>` and `pipen up <pen>` again).
+   Until then the pen shows Failed: its pod is owned by the Pen, not by
+   the new Sandbox. Data in the home PVC is not touched.
+
+The first step creates a short failure window until the second step
+finishes. The old operator cannot create or delete pods. Existing pens can
+show reconcile errors. New pens cannot start. You do not need to pause the
+operator. Complete the second step promptly.
+
+No data is lost in this window. The home PVC and Service stay in place.
+The Role still grants PVC create and read access and Service write access.
+
+## 0.7.1 grants the operator PVC write access
+
+The operator Role gains `patch` and `update` on
+`persistentvolumeclaims`. The operator uses these verbs to grow a pen's
+home PVC on resize. The `pipen-operator` chart (0.5.1) adds `get` on
+`storageclasses` to the operator ClusterRole. The operator reads the
+storage class to check that home expansion is allowed.
+
+On upgrade, pens keep their size. Nothing changes at install time. The
+upgrade is a plain `helm upgrade`. You do not need to touch any pen.
 
 ## 0.6.2 docs only
 

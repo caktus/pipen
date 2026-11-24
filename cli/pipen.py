@@ -10,15 +10,19 @@ and tailnet Service up, reporting the result on Pen status. The dev
 token can no longer create raw (privileged) pods.
 
 Verbs:
-  up <name>    Create a Pen (spec: image/homeSize/cpu/memory) and wait
-               for status ready; print the ssh line from the
+  up <name>    Create a Pen (spec: image/homeSize/cpu/memory/ttl/egress)
+               and wait for status ready; print the ssh line from the
                operator-assigned tailnet hostname. The default image
                is the operator's config default; pin one with --image.
+  pause <name> Stop compute and keep the Pen, home PVC, and hostname.
+  resume <name> Resume a paused Pen and wait for Ready.
+  resize <name> Set the pen cpu, memory and home size. The pod restarts
+                with the new size. The home grows. A shrink is refused.
   ssh <name>   Resolve the hostname from Pen status and ssh in.
   down <name>  Delete the Pen. The operator's garbage collection removes
                the pod and Service; the home PVC and its data remain
                (admin wipe: kubectl -n <ns> delete pvc <name>-home).
-  ls           List Pens in the dev namespace (phase/node/hostname).
+  ls           List Pens in the dev namespace (phase/TTL/node/hostname).
   logs <name>  Stream the env pod logs.
 
 Env names are force-prefixed with your developer/namespace so the tailnet
@@ -48,6 +52,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 
 NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 PENS_GROUP = "pens.pipen.dev/v1alpha1"
@@ -165,11 +170,41 @@ def resolve_env(name: str, dev: str) -> str:
     return name
 
 
-def pen_spec(image: str, size: str, cpu: str, memory: str) -> dict:
+SIZE_RE = re.compile(r"^(\d+)([KMGT][i]?)?$")
+SIZE_FACTORS = {
+    "": 1,
+    "K": 1000,
+    "M": 10**6,
+    "G": 10**9,
+    "T": 10**12,
+    "Ki": 1024,
+    "Mi": 1024**2,
+    "Gi": 1024**3,
+    "Ti": 1024**4,
+}
+
+
+def home_size_bytes(value: str):
+    """A Kubernetes size string (10Gi, 500M, 1024) as bytes, or None when
+    the value does not parse. The operator re-checks sizes; this is the
+    client-side shrink guard."""
+    m = SIZE_RE.match(value) if isinstance(value, str) else None
+    if not m:
+        return None
+    return int(m.group(1)) * SIZE_FACTORS[m.group(2) or ""]
+
+
+def pen_spec(
+    image: str, size: str, cpu: str, memory: str, ttl: str = "", egress: bool = False
+) -> dict:
     """Pen spec body; an empty image leaves the operator's default."""
     spec = {"homeSize": size, "cpu": cpu, "memory": memory}
     if image:
         spec["image"] = image
+    if ttl:
+        spec["ttl"] = ttl
+    if egress:
+        spec["egress"] = True
     return spec
 
 
@@ -190,6 +225,7 @@ def pen_status_fields(body: dict) -> dict:
         "hostname": status.get("hostname") or "",
         "node": status.get("node") or "",
         "message": status.get("message") or "",
+        "observedGeneration": status.get("observedGeneration"),
     }
 
 
@@ -202,6 +238,30 @@ def get_pen(api: Api, ns: str, env: str) -> "tuple[int, dict]":
     return status, body
 
 
+def poll_pen(
+    api: Api, ns: str, env: str, timeout: int, done, timeout_message: str, fail=None
+) -> dict:
+    """Poll the pen until done(status fields) is true, printing each new
+    phase or message once. fail(status fields) runs after done and may die
+    when the pen fails. Dies on timeout. Returns the final status fields."""
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        _, body = get_pen(api, ns, env)
+        f = pen_status_fields(body)
+        if done(f):
+            return f
+        if fail is not None:
+            fail(f)
+        info = f["phase"] + (f": {f['message']}" if f["message"] else "")
+        if info != last:
+            print(f"pipen: {env} {info} …", flush=True)
+            last = info
+        time.sleep(POLL_SECONDS)
+    die(timeout_message)
+    return {}  # unreachable
+
+
 def cmd_up(args, cfg, api) -> int:
     ns, dev = cfg["namespace"], cfg["dev_user"]
     env = validate_name(resolve_env(args.name, dev))
@@ -209,7 +269,13 @@ def cmd_up(args, cfg, api) -> int:
     status, body = api.request(
         "POST",
         api.pens_path(ns),
-        pen_body(env, ns, pen_spec(args.image, args.size, args.cpu, args.memory)),
+        pen_body(
+            env,
+            ns,
+            pen_spec(
+                args.image, args.size, args.cpu, args.memory, args.ttl, args.egress
+            ),
+        ),
     )
     if status in (200, 201):
         print(f"pipen: created pen {env} (operator brings the env up)")
@@ -218,24 +284,110 @@ def cmd_up(args, cfg, api) -> int:
     else:
         die(f"pen create failed: HTTP {status} {body}")
 
-    deadline = time.time() + args.timeout
-    last = None
-    while time.time() < deadline:
-        _, body = get_pen(api, ns, env)
-        f = pen_status_fields(body)
-        if f["ready"]:
-            print()
-            print(f"pipen: ready — ssh {dev}@{f['hostname']}")
-            return 0
-        if f["phase"] == "Failed":
-            die(f"pen {env} failed: {f['message']}")
-        info = f["phase"] + (f": {f['message']}" if f["message"] else "")
-        if info != last:
-            print(f"pipen: {env} {info} …", flush=True)
-            last = info
-        time.sleep(POLL_SECONDS)
-    die(f"pen {env} not ready within {args.timeout}s — `pipen ls` shows status")
-    return 0  # unreachable
+    f = poll_pen(
+        api,
+        ns,
+        env,
+        args.timeout,
+        lambda f: f["ready"],
+        f"pen {env} not ready within {args.timeout}s — `pipen ls` shows status",
+        fail=lambda f: die(f"pen {env} failed: {f['message']}")
+        if f["phase"] == "Failed"
+        else None,
+    )
+    print()
+    print(f"pipen: ready — ssh {dev}@{f['hostname']}")
+    return 0
+
+
+def set_paused(args, cfg, api, paused: bool, expected_phase: str) -> int:
+    ns, dev = cfg["namespace"], cfg["dev_user"]
+    env = validate_name(resolve_env(args.name, dev))
+    _, body = get_pen(api, ns, env)
+    body.setdefault("spec", {})["paused"] = paused
+    status, response = api.request("PUT", api.pens_path(ns, env), body)
+    if status != 200:
+        die(f"pen update failed: HTTP {status} {response}")
+    poll_pen(
+        api,
+        ns,
+        env,
+        args.timeout,
+        lambda f: f["phase"] == expected_phase,
+        f"pen {env} not {expected_phase.lower()} within {args.timeout}s — `pipen ls` shows status",
+    )
+    print(f"pipen: pen {env} {expected_phase.lower()}")
+    return 0
+
+
+def cmd_pause(args, cfg, api) -> int:
+    return set_paused(args, cfg, api, True, "Suspended")
+
+
+def cmd_resume(args, cfg, api) -> int:
+    return set_paused(args, cfg, api, False, "Ready")
+
+
+def put_generation(response):
+    """The pen generation the API server assigned to a PUT, or None when the
+    response carries none. With None the wait falls back to ready-only."""
+    if not isinstance(response, dict):
+        return None
+    generation = response.get("metadata", {}).get("generation")
+    return generation if isinstance(generation, int) else None
+
+
+def acknowledged(fields: dict, generation: int) -> bool:
+    """True when the status shows the operator has seen the spec generation
+    the resize PUT returned (status.observedGeneration >= generation)."""
+    observed = fields["observedGeneration"]
+    return isinstance(observed, int) and observed >= generation
+
+
+def cmd_resize(args, cfg, api) -> int:
+    ns, dev = cfg["namespace"], cfg["dev_user"]
+    env = validate_name(resolve_env(args.name, dev))
+    if not (args.cpu or args.memory or args.size):
+        die("give at least one of --cpu, --memory or --size")
+    _, body = get_pen(api, ns, env)
+    spec = body.setdefault("spec", {})
+    if args.size:
+        new_size = home_size_bytes(args.size)
+        if new_size is None:
+            die(f"invalid home size {args.size!r}")
+        current_size = home_size_bytes(spec.get("homeSize", ""))
+        if current_size is not None and new_size < current_size:
+            die(f"home size can only grow (pen {env} homeSize is {spec['homeSize']})")
+        spec["homeSize"] = args.size
+    if args.cpu:
+        spec["cpu"] = args.cpu
+    if args.memory:
+        spec["memory"] = args.memory
+    status, response = api.request("PUT", api.pens_path(ns, env), body)
+    if status != 200:
+        die(f"pen update failed: HTTP {status} {response}")
+    generation = put_generation(response)
+    # A stale Ready (observedGeneration below the PUT generation) is the
+    # pre-resize status; waiting on ready alone would report ready before
+    # the operator has seen the new spec. When the PUT response carries no
+    # usable generation, the wait falls back to ready-only.
+
+    def done(f) -> bool:
+        return f["ready"] and (generation is None or acknowledged(f, generation))
+
+    f = poll_pen(
+        api,
+        ns,
+        env,
+        args.timeout,
+        done,
+        f"pen {env} not ready within {args.timeout}s — `pipen ls` shows status",
+        fail=lambda f: die(f"pen {env} failed: {f['message']}")
+        if f["phase"] == "Failed"
+        else None,
+    )
+    print(f"pipen: pen {env} ready (ssh {dev}@{f['hostname']})")
+    return 0
 
 
 def cmd_ssh(args, cfg, api) -> int:
@@ -261,6 +413,34 @@ def cmd_down(args, cfg, api) -> int:
     return 0
 
 
+def now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def remaining_ttl(shutdown_at: object, current_time: datetime) -> str:
+    if not shutdown_at:
+        return "-"
+    if not isinstance(shutdown_at, str):
+        return "unknown"
+    try:
+        shutdown_time = datetime.fromisoformat(shutdown_at.replace("Z", "+00:00"))
+    except ValueError:
+        return "unknown"
+    if shutdown_time.tzinfo is None or shutdown_time.utcoffset() is None:
+        return "unknown"
+    try:
+        seconds = max(0, int((shutdown_time - current_time).total_seconds()))
+    except (TypeError, ValueError, OverflowError):
+        return "unknown"
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h{minutes}m"
+    if minutes:
+        return f"{minutes}m"
+    return f"{seconds}s"
+
+
 def cmd_ls(args, cfg, api) -> int:
     ns = cfg["namespace"]
     status, body = api.request("GET", api.pens_path(ns))
@@ -270,12 +450,15 @@ def cmd_ls(args, cfg, api) -> int:
     if not items:
         print("(no herdr envs)")
         return 0
-    print(f"{'ENV':<24} {'PHASE':<10} {'NODE':<16} HOSTNAME")
+    print(f"{'ENV':<24} {'PHASE':<10} {'TTL':<10} {'NODE':<16} HOSTNAME")
+    current_time = now()
     for pen in items:
         env = pen["metadata"]["name"]
         f = pen_status_fields(pen)
+        ttl = remaining_ttl(pen.get("status", {}).get("shutdownAt"), current_time)
         print(
-            f"{env:<24} {f['phase']:<10} {f['node'] or '-':<16} {f['hostname'] or '-'}"
+            f"{env:<24} {f['phase']:<10} {ttl:<10} "
+            f"{f['node'] or '-':<16} {f['hostname'] or '-'}"
         )
     return 0
 
@@ -318,6 +501,44 @@ def main() -> int:
         default=1800,
         help="pen-ready timeout in seconds (default: 1800)",
     )
+    p_up.add_argument(
+        "--ttl", default="", help="time until the env shuts down, for example 8h"
+    )
+    p_up.add_argument(
+        "--egress", action="store_true", help="allow only approved network destinations"
+    )
+
+    p_pause = sub.add_parser("pause", help="pause env <name> (keeps the PVC + data)")
+    p_pause.add_argument("name")
+    p_pause.add_argument(
+        "--timeout",
+        type=int,
+        default=1800,
+        help="pen-suspended timeout in seconds (default: 1800)",
+    )
+
+    p_resume = sub.add_parser("resume", help="resume paused env <name>")
+    p_resume.add_argument("name")
+    p_resume.add_argument(
+        "--timeout",
+        type=int,
+        default=1800,
+        help="pen-ready timeout in seconds (default: 1800)",
+    )
+
+    p_resize = sub.add_parser(
+        "resize", help="resize env <name> cpu, memory or home (the pod restarts)"
+    )
+    p_resize.add_argument("name")
+    p_resize.add_argument("--cpu", default="", help="new cpu request/limit")
+    p_resize.add_argument("--memory", default="", help="new memory request/limit")
+    p_resize.add_argument("--size", default="", help="new home PVC size (grow only)")
+    p_resize.add_argument(
+        "--timeout",
+        type=int,
+        default=1800,
+        help="pen-ready timeout in seconds (default: 1800)",
+    )
 
     p_ssh = sub.add_parser("ssh", help="ssh into env <name> (hostname from Pen status)")
     p_ssh.add_argument("name")
@@ -338,6 +559,9 @@ def main() -> int:
     api = Api(cfg)
     return {
         "up": cmd_up,
+        "pause": cmd_pause,
+        "resume": cmd_resume,
+        "resize": cmd_resize,
         "ssh": cmd_ssh,
         "down": cmd_down,
         "ls": cmd_ls,

@@ -2,13 +2,13 @@
 id: PI-020
 github_issue: 18
 github_url: https://github.com/caktus/pipen/issues/18
-last_synced: "2026-11-24T04:34:19.029653+00:00"
+last_synced: "2026-11-24T16:15:33.680594+00:00"
 synced_hash: a61ed8cd1bef137859b44287a7f5f84b4abad0d45130aa03c3c197078d15bf66
 title: Reconcile pens as agent-sandbox Sandbox resources
 type: Feature
 assignee: "@me"
 labels:
-  - phase/plan-ready
+  - phase/done
 context:
   relates_to: []
 ---
@@ -63,7 +63,7 @@ All findings verified by direct source read on 2026-11-24:
 ## Risks
 
 - Controller version pin: pipen must know which API version the installed agent-sandbox controller serves; cleanest is for the deployment to install a pinned agent-sandbox release alongside the operator.
-- Resume applies the _current_ `podTemplate` (v1beta1: "Resuming creates a new Pod from the current podTemplate"), so spec edits plus resume take effect on resume; that changes today's create-or-leave semantics (see resize ticket PI-016).
+- Resume applies the _current_ `podTemplate` (v1beta1: "Resuming creates a new Pod from the current podTemplate"), so spec edits plus resume take effect on resume; that changes today's create-or-leave semantics (see resize ticket #19).
 
 <!-- tickets:approaches -->
 
@@ -95,7 +95,7 @@ Decisions locked:
 3. Reconciler (`operator/internal/pen/reconcile.go`)
 
 - `ensureSandbox` replaces `ensurePod`: create `Sandbox env-<pen>` with controller ref to the Pen, `spec.podTemplate.spec` = today's pod spec verbatim (runtimeClass, nodeSelector, automountSA false, container env `DEV_USER`/`TAILNET_HOSTNAME`, volumes home + dev-secret + dev-config, privileged, resources), `spec.operatingMode` = `Suspended` when `pen.Spec.Paused` else `Running`, `spec.service` = pointer to `sandboxService` config, `spec.lifecycle` = `{shutdownTime: now+ttl, shutdownPolicy: Retain}` when a TTL applies else nil.
-- Converge instead of create-or-leave (same pattern PI-016 chose): patch `operatingMode` when `paused` changed; stamp a fresh `shutdownTime` when the TTL changed or the sandbox reports `Ready=False reason=SandboxExpired` while not paused.
+- Converge instead of create-or-leave (same pattern #19 chose): patch `operatingMode` when `paused` changed; stamp a fresh `shutdownTime` when the TTL changed or the sandbox reports `Ready=False reason=SandboxExpired` while not paused.
 - Status mapping from Sandbox conditions: `Ready=True reason=DependenciesReady` -> `PhaseReady`; `Suspended=True` or `operatingMode=Suspended` -> `PhaseSuspended`; `PodScheduled=False` -> `PhaseCreating` with the reason; `ReconcilerError` -> `PhaseFailed`. Keep reading the tailscale hostname from the Service and the node from the pod (pod read access stays for this and `pipen logs`).
 - `ensureNetworkPolicy` (new, only when `pen.Spec.Egress` and `egressHosts` is non-empty): NetworkPolicy `<pen>-egress` in the dev namespace, controller ref to the Pen, `podSelector` on the existing pod label `herdr.dev/env=<pen>`, `policyTypes: [Egress]`, allow rules = kube-dns (port 53, the same rule the namespace chart uses) + one FQDN `ipBlock` per `egressHosts` entry (Kubernetes 1.11+ allows FQDN in `ipBlock.cidr`). Delete it when the flag is off. The namespace `default-deny-egress` stays; policies intersect.
 

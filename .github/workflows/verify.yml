@@ -101,8 +101,10 @@ jobs:
           import sys, yaml
           docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
           kinds = [d["kind"] for d in docs]
-          assert len(docs) == 9, f"expected 9 manifests, got {len(docs)}"
-          assert "CustomResourceDefinition" in kinds, "CRD missing from the render"
+          assert len(docs) == 16, f"expected 16 manifests, got {len(docs)}"
+          crds = [d["metadata"]["name"] for d in docs if d["kind"] == "CustomResourceDefinition"]
+          assert "pens.pens.pipen.dev" in crds, "pen CRD missing from the render"
+          assert "sandboxes.agents.x-k8s.io" in crds, "agent-sandbox CRD missing from the render"
           print(f"{len(docs)} manifests OK: " + ", ".join(kinds))
           '
 
@@ -129,7 +131,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version: "1.26"
       - name: gofmt
         run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
         working-directory: operator
@@ -318,27 +320,66 @@ jobs:
           sudo install linux-amd64/helm /usr/local/bin/helm
       - name: Create the kind cluster
         run: kind create cluster --name e2e
+      - name: Create the expandable StorageClass
+        run: |
+          # the kind default StorageClass (standard) does not allow volume
+          # expansion, so the pen resize would fail. The job clones the
+          # working provisioner of the default class into a class that does
+          # allow it, so the provisioner name is read at runtime instead of
+          # hardcoded. The class must exist before the pen is created (the
+          # PVC is provisioned at pen create). The operator chart install
+          # below points the operator at this class
+          provisioner=$(kubectl get sc standard -o jsonpath='{.provisioner}')
+          [ -n "$provisioner" ] || { echo "no provisioner on the default StorageClass" >&2; exit 1; }
+          cat <<EOF | kubectl apply -f -
+          apiVersion: storage.k8s.io/v1
+          kind: StorageClass
+          metadata:
+            name: expandable
+          provisioner: $provisioner
+          allowVolumeExpansion: true
+          reclaimPolicy: Delete
+          volumeBindingMode: WaitForFirstConsumer
+          EOF
       - name: Build the operator image
         run: docker build -t pipen-operator:e2e operator/
       - name: Load the operator image into kind
         run: kind load docker-image pipen-operator:e2e --name e2e
-      - name: Install both charts with kind-shaped values
+      - name: Download and verify the pinned agent-sandbox asset
         run: |
-          # kind shape: the long-running pause image, the kind default
-          # storage class, a small pod, no runtime class (kind runs no
-          # kata). nodeSelector and serviceAnnotations cannot be cleared
-          # with --set or a values file (helm deep-merges maps), so the
-          # config is patched to the kind shape after the install.
+          # The operator chart is the only installer. This download pins the
+          # release that its vendored agent-sandbox manifest must match.
+          sandbox_file="$RUNNER_TEMP/sandbox.yaml"
+          curl -fsSL "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v1.0.12/sandbox.yaml" \
+            -o "$sandbox_file"
+          echo "9c400c9d875061088c28598525b7ec37a5c2cb50460804c6b6f53f5fc37301ff  $sandbox_file" \
+            | sha256sum --check -
+      - name: Install the operator chart with kind-shaped values
+        run: |
+          # kind shape: the long-running pause image, a small pod.
+          # serviceAnnotations cannot be cleared with --set or a values file
+          # (helm deep-merges maps), so that config is patched to the kind
+          # shape after the install. The other chart defaults now match the
+          # plain kind cluster (no runtime class, no node selector). The
+          # kind default StorageClass does not allow volume expansion, so
+          # the install points the operator at the expandable class created
+          # above.
           helm install operator charts/pipen-operator \
             --set image=pipen-operator:e2e \
             --set config.image=registry.k8s.io/pause:3.10 \
             --set config.homeSize=1Gi \
             --set config.cpu=100m \
             --set config.memory=128Mi \
-            --set config.storageClass=standard \
-            --set config.runtimeClass=
+            --set config.storageClass=expandable
           kubectl -n pipen patch configmap pipen-operator-config \
-            --type merge -p '{"data":{"nodeSelector":"{}","serviceAnnotations":"{}"}}'
+            --type merge -p '{"data":{"serviceAnnotations":"{}"}}'
+      - name: The agent-sandbox controller is ready
+        run: |
+          kubectl get crd sandboxes.agents.x-k8s.io
+          kubectl -n agent-sandbox-system rollout status \
+            deploy/agent-sandbox-controller --timeout=180s
+      - name: Install the dev-namespace chart
+        run: |
           helm install ci-dev charts/dev-namespace \
             --set dev=ci \
             --set 'authorizedKeys[0]=ssh-ed25519 AAAACIKEY e2e'
@@ -412,30 +453,33 @@ jobs:
           apiVersion: pens.pipen.dev/v1alpha1
           kind: Pen
           metadata:
-            name: smoke
+            name: ci-smoke
             namespace: env-ci
-          spec: {}
+          spec:
+            ttl: 1h
           EOF
-      - name: The PVC, Service and Pod appear
+      - name: The PVC, Service, Sandbox and Pod appear
         run: |
           # the operator reconciles on its own schedule; allow it a moment
           for i in $(seq 1 30); do
-            kubectl -n env-ci get pvc smoke-home >/dev/null 2>&1 \
-              && kubectl -n env-ci get service smoke >/dev/null 2>&1 \
-              && kubectl -n env-ci get pod env-smoke >/dev/null 2>&1 \
+            kubectl -n env-ci get pvc ci-smoke-home >/dev/null 2>&1 \
+              && kubectl -n env-ci get service ci-smoke >/dev/null 2>&1 \
+              && kubectl -n env-ci get sandbox env-ci-smoke >/dev/null 2>&1 \
+              && kubectl -n env-ci get pod env-ci-smoke >/dev/null 2>&1 \
               && break
             sleep 2
           done
-          kubectl -n env-ci get pvc smoke-home
-          kubectl -n env-ci get service smoke
-          kubectl -n env-ci get pod env-smoke
+          kubectl -n env-ci get pvc ci-smoke-home
+          kubectl -n env-ci get service ci-smoke
+          kubectl -n env-ci get sandbox env-ci-smoke
+          kubectl -n env-ci get pod env-ci-smoke
       - name: The pod is ready
-        run: kubectl -n env-ci wait --for=condition=Ready pod/env-smoke --timeout=180s
+        run: kubectl -n env-ci wait --for=condition=Ready pod/env-ci-smoke --timeout=180s
       - name: The pod spec sets DEV_USER to the dev name
         run: |
           # the operator sets DEV_USER to the herdr.dev/owner label value
           # (the bare dev name), not the namespace name env-ci
-          user="$(kubectl -n env-ci get pod env-smoke \
+          user="$(kubectl -n env-ci get pod env-ci-smoke \
             -o jsonpath='{.spec.containers[0].env[?(@.name=="DEV_USER")].value}')"
           [ "$user" = "ci" ] \
             || { echo "DEV_USER = $user, want ci" >&2; exit 1; }
@@ -486,31 +530,237 @@ jobs:
           # simulated through the Service status subresource (the main
           # resource drops client status writes); the reconciler reports
           # the ingress hostname it reads
-          kubectl -n env-ci patch service smoke --subresource status --type merge \
-            -p '{"status":{"loadBalancer":{"ingress":[{"hostname":"smoke.ts.e2e"}]}}}'
+          kubectl -n env-ci patch service ci-smoke --subresource status --type merge \
+            -p '{"status":{"loadBalancer":{"ingress":[{"hostname":"ci-smoke.ts.e2e"}]}}}'
           phase=""
           for i in $(seq 1 60); do
-            phase=$(kubectl -n env-ci get pen smoke -o jsonpath='{.status.phase}')
+            phase=$(kubectl -n env-ci get pen ci-smoke -o jsonpath='{.status.phase}')
             [ "$phase" = "Ready" ] && break
             sleep 2
           done
           [ "$phase" = "Ready" ] || { echo "pen phase = $phase, want Ready" >&2; exit 1; }
-          hostname=$(kubectl -n env-ci get pen smoke -o jsonpath='{.status.hostname}')
-          [ "$hostname" = "smoke.ts.e2e" ] \
-            || { echo "pen hostname = $hostname, want smoke.ts.e2e" >&2; exit 1; }
+          hostname=$(kubectl -n env-ci get pen ci-smoke -o jsonpath='{.status.hostname}')
+          [ "$hostname" = "ci-smoke.ts.e2e" ] \
+            || { echo "pen hostname = $hostname, want ci-smoke.ts.e2e" >&2; exit 1; }
           echo "pen Ready at $hostname"
-      - name: Deletion leaves the PVC
+      - name: Write a resize marker into the home PVC
         run: |
-          # the pen and its pod/Service are owned by the Pen and are
-          # garbage-collected with it; the home PVC is deliberately not
-          # owned, so the dev's data survives a pen deletion
-          kubectl --kubeconfig "$DEV_KUBECONFIG" -n env-ci delete pen smoke --wait=false
+          # The pen pod runs the pause image, which has no shell, so the
+          # marker is written by a busybox pod that mounts the home PVC.
+          # RWO is fine: kind is one node, so both pods land on it
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: resize-marker
+            namespace: env-ci
+          spec:
+            restartPolicy: Never
+            containers:
+              - name: marker
+                image: registry.k8s.io/busybox:1.27
+                command: [sh, -c, 'touch /home/resize-marker']
+                volumeMounts:
+                  - name: home
+                    mountPath: /home
+            volumes:
+              - name: home
+                persistentVolumeClaim:
+                  claimName: ci-smoke-home
+          EOF
+          exit_code=""
           for i in $(seq 1 60); do
-            kubectl -n env-ci get pod env-smoke >/dev/null 2>&1 || break
+            exit_code=$(kubectl -n env-ci get pod resize-marker \
+              -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}' \
+              2>/dev/null || true)
+            [ -n "$exit_code" ] && break
             sleep 2
           done
-          kubectl -n env-ci get pod env-smoke 2>/dev/null \
-            && { echo "pod env-smoke still present" >&2; exit 1; }
-          kubectl -n env-ci get service smoke 2>/dev/null \
-            && { echo "service smoke still present" >&2; exit 1; }
-          kubectl -n env-ci get pvc smoke-home
+          [ "$exit_code" = "0" ] \
+            || { kubectl -n env-ci get pod resize-marker -o yaml; echo "marker write exit code = ${exit_code:-not finished}, want 0" >&2; exit 1; }
+          kubectl -n env-ci delete pod resize-marker --wait=false
+      - name: Resize the pen with the CLI
+        run: |
+          # The e2e defaults are 100m / 128Mi / 1Gi (set by the operator
+          # chart install above); the resize doubles the cpu and memory.
+          # The resize does not change the home size: the kind cluster
+          # provisions through rancher.io/local-path, which does not
+          # implement volume expansion, so a live grow can never finish
+          # in this job. The expansion logic (the SC check, the PVC
+          # patch, the stall timeout) is unit-tested. See the PI-019 To
+          # Do: assert a live grow when CI runs a provisioner that can
+          # expand. The job still creates the expandable class and the
+          # chart install points the operator at it, so the operator
+          # runs against a named StorageClass like a real install
+          # Record the pod uid first: the CLI can report Ready before
+          # the operator starts the resize (its poll sees the stale
+          # status), so the next step waits for a pod with a new uid
+          uid=$(kubectl -n env-ci get pod env-ci-smoke -o jsonpath='{.metadata.uid}')
+          [ -n "$uid" ] || { echo "pod env-ci-smoke not found" >&2; exit 1; }
+          echo "RESIZE_POD_UID=$uid" >> "$GITHUB_ENV"
+          # The CLI reads a flat config file (api_base, namespace,
+          # dev_user, token) instead of a kubeconfig. The server comes
+          # from the kind kubeconfig, the token from the dev kubeconfig.
+          # The CLI is stdlib-only python, so no install step is needed
+          server=$(kind get kubeconfig --name e2e | grep -oE 'https://127\.0\.0\.1:[0-9]+' | head -1)
+          [ -n "$server" ] || { echo "kind cluster server not found in the kubeconfig" >&2; exit 1; }
+          token=$(python3 -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["users"][0]["user"]["token"])' "$DEV_KUBECONFIG")
+          [ -n "$token" ] || { echo "dev token not found in $DEV_KUBECONFIG" >&2; exit 1; }
+          cat > "$RUNNER_TEMP/pipen-e2e.yaml" <<EOF
+          api_base: $server
+          namespace: env-ci
+          dev_user: ci
+          token: $token
+          EOF
+          PIPEN_CONFIG="$RUNNER_TEMP/pipen-e2e.yaml" \
+            python3 cli/pipen.py resize ci-smoke \
+            --cpu 200m --memory 256Mi --timeout 300
+      - name: The resize restarts the pod with the new resources
+        run: |
+          # The new pod is built from the updated sandbox template, so
+          # once a pod with a new uid is Ready, one resource read is
+          # enough
+          uid=""
+          for i in $(seq 1 30); do
+            uid=$(kubectl -n env-ci get pod env-ci-smoke \
+              -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+            if [ -n "$uid" ] && [ "$uid" != "$RESIZE_POD_UID" ] \
+              && kubectl -n env-ci get pod env-ci-smoke \
+                -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' \
+                | grep -q True; then
+              break
+            fi
+            sleep 10
+          done
+          [ -n "$uid" ] && [ "$uid" != "$RESIZE_POD_UID" ] \
+            || { echo "pod not recreated (uid = ${uid:-absent}, before = $RESIZE_POD_UID)" >&2; exit 1; }
+          kubectl -n env-ci wait --for=condition=Ready pod/env-ci-smoke --timeout=180s
+          cpu=$(kubectl -n env-ci get pod env-ci-smoke \
+            -o jsonpath='{.spec.containers[0].resources.requests.cpu}')
+          [ "$cpu" = "200m" ] || { echo "pod cpu = $cpu, want 200m" >&2; exit 1; }
+          mem=$(kubectl -n env-ci get pod env-ci-smoke \
+            -o jsonpath='{.spec.containers[0].resources.requests.memory}')
+          [ "$mem" = "256Mi" ] || { echo "pod memory = $mem, want 256Mi" >&2; exit 1; }
+      - name: The pen is Ready again after the resize
+        run: |
+          phase=""
+          for i in $(seq 1 30); do
+            phase=$(kubectl -n env-ci get pen ci-smoke -o jsonpath='{.status.phase}')
+            [ "$phase" = "Ready" ] && break
+            sleep 2
+          done
+          [ "$phase" = "Ready" ] || { echo "pen phase = $phase, want Ready" >&2; exit 1; }
+      - name: The marker file survived the resize
+        run: |
+          # The pause image has no shell, so the check runs in a
+          # busybox pod that mounts the home PVC, like the write step
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: resize-marker-check
+            namespace: env-ci
+          spec:
+            restartPolicy: Never
+            containers:
+              - name: check
+                image: registry.k8s.io/busybox:1.27
+                command: [sh, -c, 'test -f /home/resize-marker']
+                volumeMounts:
+                  - name: home
+                    mountPath: /home
+            volumes:
+              - name: home
+                persistentVolumeClaim:
+                  claimName: ci-smoke-home
+          EOF
+          exit_code=""
+          for i in $(seq 1 60); do
+            exit_code=$(kubectl -n env-ci get pod resize-marker-check \
+              -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}' \
+              2>/dev/null || true)
+            [ -n "$exit_code" ] && break
+            sleep 2
+          done
+          [ "$exit_code" = "0" ] \
+            || { kubectl -n env-ci get pod resize-marker-check -o yaml; echo "marker check exit code = ${exit_code:-not finished}, want 0 (marker file missing?)" >&2; exit 1; }
+          kubectl -n env-ci delete pod resize-marker-check --wait=false
+      - name: Pause removes the pod and keeps the Service and PVC
+        run: |
+          shutdown_before_pause=$(kubectl -n env-ci get pen ci-smoke \
+            -o jsonpath='{.status.shutdownAt}')
+          [ -n "$shutdown_before_pause" ] \
+            || { echo "pen shutdownAt is empty before pause" >&2; exit 1; }
+          echo "SHUTDOWN_BEFORE_PAUSE=$shutdown_before_pause" >> "$GITHUB_ENV"
+          # The dev Role grants update but not patch. These admin patches
+          # change the same spec.paused field that the CLI updates.
+          kubectl -n env-ci patch pen ci-smoke \
+            --type merge -p '{"spec":{"paused":true}}'
+          phase=""
+          for i in $(seq 1 60); do
+            phase=$(kubectl -n env-ci get pen ci-smoke -o jsonpath='{.status.phase}')
+            if [ "$phase" = "Suspended" ] \
+              && ! kubectl -n env-ci get pod env-ci-smoke >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          [ "$phase" = "Suspended" ] \
+            || { echo "pen phase = $phase, want Suspended" >&2; exit 1; }
+          kubectl -n env-ci get pod env-ci-smoke 2>/dev/null \
+            && { echo "pod env-ci-smoke still present after pause" >&2; exit 1; }
+          mode=$(kubectl -n env-ci get sandbox env-ci-smoke -o jsonpath='{.spec.operatingMode}')
+          [ "$mode" = "Suspended" ] \
+            || { echo "sandbox operatingMode = $mode, want Suspended" >&2; exit 1; }
+          kubectl -n env-ci get service ci-smoke
+          kubectl -n env-ci get pvc ci-smoke-home
+      - name: Resume restores Ready and resets the TTL
+        run: |
+          kubectl -n env-ci patch pen ci-smoke \
+            --type merge -p '{"spec":{"paused":false}}'
+          before=$(date --date="$SHUTDOWN_BEFORE_PAUSE" +%s)
+          phase=""
+          shutdown_at=""
+          fresh=false
+          for i in $(seq 1 60); do
+            phase=$(kubectl -n env-ci get pen ci-smoke -o jsonpath='{.status.phase}')
+            shutdown_at=$(kubectl -n env-ci get pen ci-smoke -o jsonpath='{.status.shutdownAt}')
+            if [ "$phase" = "Ready" ] && [ -n "$shutdown_at" ]; then
+              after=$(date --date="$shutdown_at" +%s)
+              if [ "$after" -gt "$before" ]; then
+                fresh=true
+                break
+              fi
+            fi
+            sleep 2
+          done
+          [ "$fresh" = "true" ] \
+            || { echo "pen phase = $phase, shutdownAt = $shutdown_at; want Ready and a time after $SHUTDOWN_BEFORE_PAUSE" >&2; exit 1; }
+          kubectl -n env-ci wait --for=condition=Ready pod/env-ci-smoke --timeout=180s
+          hostname=$(kubectl -n env-ci get pen ci-smoke -o jsonpath='{.status.hostname}')
+          [ "$hostname" = "ci-smoke.ts.e2e" ] \
+            || { echo "pen hostname = $hostname, want ci-smoke.ts.e2e" >&2; exit 1; }
+          echo "pen Ready again at $hostname with shutdownAt $shutdown_at"
+      - name: Down removes the Pen, Sandbox and Pod but leaves the PVC
+        run: |
+          # the Sandbox, pod and Service are owned by the Pen and are
+          # garbage-collected with it; the home PVC is deliberately not
+          # owned, so the dev's data survives a pen deletion
+          kubectl --kubeconfig "$DEV_KUBECONFIG" -n env-ci delete pen ci-smoke --wait=false
+          for i in $(seq 1 60); do
+            if ! kubectl -n env-ci get pen ci-smoke >/dev/null 2>&1 \
+              && ! kubectl -n env-ci get sandbox env-ci-smoke >/dev/null 2>&1 \
+              && ! kubectl -n env-ci get pod env-ci-smoke >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          kubectl -n env-ci get pen ci-smoke 2>/dev/null \
+            && { echo "pen ci-smoke still present" >&2; exit 1; }
+          kubectl -n env-ci get sandbox env-ci-smoke 2>/dev/null \
+            && { echo "sandbox env-ci-smoke still present" >&2; exit 1; }
+          kubectl -n env-ci get pod env-ci-smoke 2>/dev/null \
+            && { echo "pod env-ci-smoke still present" >&2; exit 1; }
+          kubectl -n env-ci get service ci-smoke 2>/dev/null \
+            && { echo "service ci-smoke still present" >&2; exit 1; }
+          kubectl -n env-ci get pvc ci-smoke-home

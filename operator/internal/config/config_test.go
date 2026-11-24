@@ -34,6 +34,9 @@ func TestFromDataFull(t *testing.T) {
 		ImagePullPolicy:    "Always",
 		LoadBalancerClass:  "tailscale",
 		RuntimeClass:       "kata",
+		DefaultTTL:         "",
+		SandboxService:     false,
+		EgressHosts:        []string{},
 	}
 	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("cfg = %+v, want %+v", cfg, want)
@@ -54,8 +57,8 @@ func TestFromDataMinimal(t *testing.T) {
 	if cfg.LoadBalancerClass != "tailscale" {
 		t.Errorf("loadBalancerClass = %q, want tailscale", cfg.LoadBalancerClass)
 	}
-	if cfg.RuntimeClass != "kata" {
-		t.Errorf("runtimeClass = %q, want kata", cfg.RuntimeClass)
+	if cfg.RuntimeClass != "" {
+		t.Errorf("runtimeClass = %q, want empty", cfg.RuntimeClass)
 	}
 }
 
@@ -97,5 +100,105 @@ func TestFromDataInvalidAnnotations(t *testing.T) {
 func TestFromDataMissingImage(t *testing.T) {
 	if _, err := FromData(map[string]string{}); err == nil {
 		t.Fatal("expected error when image is missing")
+	}
+}
+
+func TestFromDataWithNewKeys(t *testing.T) {
+	cfg, err := FromData(map[string]string{
+		"image":          "ghcr.io/caktus/pipen:latest",
+		"defaultTTL":     "8h",
+		"sandboxService": "true",
+		"egressHosts":    "example.com,api.example.org",
+	})
+	if err != nil {
+		t.Fatalf("FromData: %v", err)
+	}
+	if cfg.DefaultTTL != "8h" {
+		t.Errorf("DefaultTTL = %q, want \"8h\"", cfg.DefaultTTL)
+	}
+	if !cfg.SandboxService {
+		t.Errorf("SandboxService = false, want true")
+	}
+	if len(cfg.EgressHosts) != 2 || cfg.EgressHosts[0] != "example.com" || cfg.EgressHosts[1] != "api.example.org" {
+		t.Errorf("EgressHosts = %v, want [\"example.com\" \"api.example.org\"]", cfg.EgressHosts)
+	}
+}
+
+func TestFromDataNewKeysDefaults(t *testing.T) {
+	cfg, err := FromData(map[string]string{
+		"image": "ghcr.io/caktus/pipen:latest",
+	})
+	if err != nil {
+		t.Fatalf("FromData: %v", err)
+	}
+	if cfg.DefaultTTL != "" {
+		t.Errorf("DefaultTTL = %q, want empty (no auto-shutdown)", cfg.DefaultTTL)
+	}
+	if cfg.SandboxService {
+		t.Errorf("SandboxService = true, want false (default)")
+	}
+	if len(cfg.EgressHosts) != 0 {
+		t.Errorf("EgressHosts = %v, want empty slice", cfg.EgressHosts)
+	}
+}
+
+func TestFromDataSandboxServiceFalse(t *testing.T) {
+	cfg, err := FromData(map[string]string{
+		"image":          "ghcr.io/caktus/pipen:latest",
+		"sandboxService": "false",
+	})
+	if err != nil {
+		t.Fatalf("FromData: %v", err)
+	}
+	if cfg.SandboxService {
+		t.Errorf("SandboxService = true, want false")
+	}
+}
+
+func TestFromDataSandboxServiceInvalid(t *testing.T) {
+	if _, err := FromData(map[string]string{
+		"image":          "ghcr.io/caktus/pipen:latest",
+		"sandboxService": "invalid",
+	}); err == nil {
+		t.Fatal("expected error for invalid sandboxService value")
+	}
+}
+
+func TestFromDataEgressHostsDropsTrailingComma(t *testing.T) {
+	cfg, err := FromData(map[string]string{
+		"image":       "ghcr.io/caktus/pipen:latest",
+		"egressHosts": "example.com,",
+	})
+	if err != nil {
+		t.Fatalf("FromData: %v", err)
+	}
+	if len(cfg.EgressHosts) != 1 || cfg.EgressHosts[0] != "example.com" {
+		t.Errorf("EgressHosts = %v, want [\"example.com\"] (blank entries dropped)", cfg.EgressHosts)
+	}
+}
+
+func TestFromDataEgressHostsWhitespaceOnly(t *testing.T) {
+	cfg, err := FromData(map[string]string{
+		"image":       "ghcr.io/caktus/pipen:latest",
+		"egressHosts": "   ",
+	})
+	if err != nil {
+		t.Fatalf("FromData: %v", err)
+	}
+	if len(cfg.EgressHosts) != 0 {
+		t.Errorf("EgressHosts = %v, want empty slice (blank entries dropped)", cfg.EgressHosts)
+	}
+}
+
+func TestFromDataEgressHostsEmptyString(t *testing.T) {
+	cfg, err := FromData(map[string]string{
+		"image":       "ghcr.io/caktus/pipen:latest",
+		"egressHosts": "",
+	})
+	if err != nil {
+		t.Fatalf("FromData: %v", err)
+	}
+	if len(cfg.EgressHosts) != 0 {
+		t.Errorf("EgressHosts = %v, want empty slice", cfg.EgressHosts)
 	}
 }

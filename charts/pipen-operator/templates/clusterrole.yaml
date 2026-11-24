@@ -1,6 +1,7 @@
-# Cluster-scoped READ-ONLY access to Pens only: the operator reconciles
-# pens in every provisioned developer namespace. All writes are
-# per-namespace Roles created by the dev-namespace chart.
+# Cluster-scoped READ-ONLY access to pens, namespaces and storageclasses: the operator reconciles pens
+# in every provisioned developer namespace. It also reads the storage
+# class to check home expansion. All writes are per-namespace Roles
+# created by the dev-namespace chart.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -13,4 +14,7 @@ rules:
     verbs: [get, list, watch]
   - apiGroups: [""]
     resources: [namespaces]
+    verbs: [get]
+  - apiGroups: ["storage.k8s.io"]
+    resources: [storageclasses]
     verbs: [get]

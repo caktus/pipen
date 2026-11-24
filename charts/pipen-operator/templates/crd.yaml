@@ -55,6 +55,11 @@ spec:
                 cpu:
                   description: CPU is the pod cpu request and limit (default 4).
                   type: string
+                egress:
+                  description: |-
+                    Egress enables a NetworkPolicy that restricts egress to approved
+                    destinations.
+                  type: boolean
                 homeSize:
                   description:
                     HomeSize is the size of the mirrored home PVC (default
@@ -67,6 +72,16 @@ spec:
                   type: string
                 memory:
                   description: Memory is the pod memory request and limit (default 8Gi).
+                  type: string
+                paused:
+                  description:
+                    Paused stops the pen's compute while keeping PVC and
+                    Service.
+                  type: boolean
+                ttl:
+                  description:
+                    TTL is a duration like "8h" after which the pen shuts
+                    itself down.
                   type: string
               type: object
             status:
@@ -97,6 +112,12 @@ spec:
                 ready:
                   description: Ready is true when ssh via status.hostname works.
                   type: boolean
+                shutdownAt:
+                  description:
+                    ShutdownAt is the time after which the pen auto-shuts
+                    down.
+                  format: date-time
+                  type: string
               required:
                 - ready
               type: object

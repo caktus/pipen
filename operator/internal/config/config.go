@@ -5,6 +5,8 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 )
 
 // ConfigMapName is the ConfigMap the operator reads for its config, in the
@@ -33,9 +35,16 @@ type Config struct {
 	ImagePullPolicy string
 	// LoadBalancerClass is set on each pen Service (tailscale).
 	LoadBalancerClass string
-	// RuntimeClass is the pod runtime class (kata). Empty means no runtime
-	// class at all (clusters that run no kata runtime, e.g. kind e2e).
+	// RuntimeClass is the pod runtime class. Empty means no runtime class.
 	RuntimeClass string
+	// DefaultTTL is the default pen TTL (duration like "8h"). Empty means no
+	// auto-shutdown.
+	DefaultTTL string
+	// SandboxService controls whether the agent-sandbox controller creates
+	// a Service for each sandbox (in addition to the tailscale Service).
+	SandboxService bool
+	// EgressHosts are allowed FQDNs for egress (comma-separated).
+	EgressHosts []string
 }
 
 // FromData builds a Config from ConfigMap data keys, applying defaults.
@@ -48,7 +57,10 @@ func FromData(data map[string]string) (Config, error) {
 		ServiceAnnotations: map[string]string{},
 		ImagePullPolicy:    "IfNotPresent",
 		LoadBalancerClass:  "tailscale",
-		RuntimeClass:       "kata",
+		RuntimeClass:       "",
+		DefaultTTL:         "",
+		SandboxService:     false,
+		EgressHosts:        []string{},
 	}
 	for k, v := range data {
 		switch k {
@@ -77,6 +89,23 @@ func FromData(data map[string]string) (Config, error) {
 		case "serviceAnnotations":
 			if err := json.Unmarshal([]byte(v), &cfg.ServiceAnnotations); err != nil {
 				return cfg, fmt.Errorf("serviceAnnotations: %w", err)
+			}
+		case "defaultTTL":
+			cfg.DefaultTTL = v
+		case "sandboxService":
+			b, err := strconv.ParseBool(v)
+			if err != nil {
+				return cfg, fmt.Errorf("sandboxService: %w", err)
+			}
+			cfg.SandboxService = b
+		case "egressHosts":
+			// Blank entries (trailing commas, whitespace-only values) must
+			// not become empty ipBlock CIDRs in the egress NetworkPolicy.
+			cfg.EgressHosts = []string{}
+			for _, host := range strings.Split(v, ",") {
+				if host = strings.TrimSpace(host); host != "" {
+					cfg.EgressHosts = append(cfg.EgressHosts, host)
+				}
 			}
 		default:
 			// Unknown keys are ignored: the chart may add informational

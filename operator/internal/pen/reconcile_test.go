@@ -5,8 +5,13 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	storagev1 "k8s.io/api/storage/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -15,6 +20,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	v1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 
 	v1alpha1 "github.com/caktus/pipen/operator/api/v1alpha1"
 	"github.com/caktus/pipen/operator/internal/config"
@@ -34,6 +41,9 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	if err := v1alpha1.AddToScheme(s); err != nil {
 		t.Fatal(err)
 	}
+	if err := v1beta1.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
 	return s
 }
 
@@ -51,7 +61,7 @@ func testConfig() config.Config {
 		TailnetDomain:     "ts.example.net",
 		ImagePullPolicy:   "IfNotPresent",
 		LoadBalancerClass: "tailscale",
-		RuntimeClass:      "kata",
+		RuntimeClass:      "",
 	}
 }
 
@@ -135,7 +145,12 @@ func reconcileOnceIn(t *testing.T, c client.Client, ns string) reconcile.Result 
 
 func reconcileOnceWith(t *testing.T, c client.Client, ns string, cfg config.Config) reconcile.Result {
 	t.Helper()
-	r := &Reconciler{Client: c, Reader: c, Scheme: testScheme(t), Config: cfg}
+	return reconcileOnceAt(t, c, ns, cfg, time.Date(2026, 11, 24, 8, 0, 0, 0, time.UTC))
+}
+
+func reconcileOnceAt(t *testing.T, c client.Client, ns string, cfg config.Config, now time.Time) reconcile.Result {
+	t.Helper()
+	r := &Reconciler{Client: c, Reader: c, Scheme: testScheme(t), Config: cfg, Now: func() time.Time { return now }}
 	res, err := r.Reconcile(context.Background(),
 		reconcile.Request{NamespacedName: types.NamespacedName{Name: penName, Namespace: ns}})
 	if err != nil {
@@ -261,32 +276,32 @@ func TestReconcileCreatesObjects(t *testing.T) {
 		t.Errorf("service ownerRefs = %+v, want one Pen ownerRef", svc.OwnerReferences)
 	}
 
-	pod := &corev1.Pod{}
-	if err := c.Get(ctx, types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, pod); err != nil {
-		t.Fatalf("pod not created: %v", err)
+	sandbox := &v1beta1.Sandbox{}
+	if err := c.Get(ctx, types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, sandbox); err != nil {
+		t.Fatalf("sandbox not created: %v", err)
 	}
-	if pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName != "kata" {
-		t.Errorf("pod runtimeClass = %v, want kata", pod.Spec.RuntimeClassName)
+	if sandbox.Spec.PodTemplate.Spec.RuntimeClassName != nil {
+		t.Errorf("sandbox podTemplate runtimeClass = %v, want nil for empty runtime class", sandbox.Spec.PodTemplate.Spec.RuntimeClassName)
 	}
-	sec := pod.Spec.Containers[0].SecurityContext
+	sec := sandbox.Spec.PodTemplate.Spec.Containers[0].SecurityContext
 	if sec == nil || sec.Privileged == nil || !*sec.Privileged {
-		t.Error("pod container not privileged")
+		t.Error("sandbox container not privileged")
 	}
-	if pod.Spec.NodeSelector["openebs.io/engine"] != "mayastor" {
-		t.Errorf("pod nodeSelector = %v, want openebs.io/engine=mayastor", pod.Spec.NodeSelector)
+	if sandbox.Spec.PodTemplate.Spec.NodeSelector["openebs.io/engine"] != "mayastor" {
+		t.Errorf("sandbox nodeSelector = %v, want openebs.io/engine=mayastor", sandbox.Spec.PodTemplate.Spec.NodeSelector)
 	}
-	ctr := pod.Spec.Containers[0]
+	ctr := sandbox.Spec.PodTemplate.Spec.Containers[0]
 	if ctr.Image != "ghcr.io/caktus/pipen:latest" {
-		t.Errorf("pod image = %q, want cfg default", ctr.Image)
+		t.Errorf("sandbox image = %q, want cfg default", ctr.Image)
 	}
 	if ctr.ImagePullPolicy != corev1.PullAlways {
-		t.Errorf("pod pullPolicy = %q, want Always for latest tag", ctr.ImagePullPolicy)
+		t.Errorf("sandbox pullPolicy = %q, want Always for latest tag", ctr.ImagePullPolicy)
 	}
 	if ctr.Resources.Requests.Cpu().String() != "4" || ctr.Resources.Limits.Cpu().String() != "4" {
-		t.Errorf("pod cpu req/lim wrong: %+v", ctr.Resources)
+		t.Errorf("sandbox cpu req/lim wrong: %+v", ctr.Resources)
 	}
 	if ctr.Resources.Requests.Memory().String() != "8Gi" || ctr.Resources.Limits.Memory().String() != "8Gi" {
-		t.Errorf("pod memory req/lim wrong: %+v", ctr.Resources)
+		t.Errorf("sandbox memory req/lim wrong: %+v", ctr.Resources)
 	}
 	envs := map[string]string{}
 	for _, e := range ctr.Env {
@@ -303,22 +318,22 @@ func TestReconcileCreatesObjects(t *testing.T) {
 		t.Errorf("volumeMounts = %v", mounts)
 	}
 	vols := map[string]bool{}
-	for _, v := range pod.Spec.Volumes {
+	for _, v := range sandbox.Spec.PodTemplate.Spec.Volumes {
 		vols[v.Name] = true
 	}
 	if !vols["home"] || !vols["dev-secret"] || !vols["dev-config"] {
 		t.Errorf("volumes = %v", vols)
 	}
-	if len(pod.OwnerReferences) != 1 || pod.OwnerReferences[0].Kind != "Pen" {
-		t.Errorf("pod ownerRefs = %+v, want one Pen ownerRef", pod.OwnerReferences)
+	if len(sandbox.OwnerReferences) != 1 || sandbox.OwnerReferences[0].Kind != "Pen" {
+		t.Errorf("sandbox ownerRefs = %+v, want one Pen ownerRef", sandbox.OwnerReferences)
 	}
-	if pod.Labels["herdr.dev/env"] != penName {
-		t.Errorf("pod label herdr.dev/env = %q", pod.Labels["herdr.dev/env"])
+	if sandbox.Labels["herdr.dev/env"] != penName {
+		t.Errorf("sandbox label herdr.dev/env = %q", sandbox.Labels["herdr.dev/env"])
 	}
 
 	p := getPen(t, c)
 	if p.Status.Phase != v1alpha1.PhaseCreating {
-		t.Errorf("phase = %q, want Creating (pod not ready yet)", p.Status.Phase)
+		t.Errorf("phase = %q, want Creating (sandbox not ready yet)", p.Status.Phase)
 	}
 	if p.Status.Ready {
 		t.Error("ready = true, want false")
@@ -336,15 +351,15 @@ func TestDevConfigVolumeOptionalAndNoSAToken(t *testing.T) {
 	objs := append([]client.Object{ownedNS(t, devNS), newPen()}, devObjects(devNS)...)
 	c := newClient(t, objs...)
 	reconcileOnce(t, c)
-	pod := &corev1.Pod{}
-	if err := c.Get(context.Background(), types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, pod); err != nil {
+	sandbox := &v1beta1.Sandbox{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, sandbox); err != nil {
 		t.Fatal(err)
 	}
-	if pod.Spec.AutomountServiceAccountToken == nil || *pod.Spec.AutomountServiceAccountToken {
-		t.Errorf("automountServiceAccountToken = %v, want false", pod.Spec.AutomountServiceAccountToken)
+	if sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken == nil || *sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken {
+		t.Errorf("automountServiceAccountToken = %v, want false", sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken)
 	}
 	var cm *corev1.ConfigMapVolumeSource
-	for _, v := range pod.Spec.Volumes {
+	for _, v := range sandbox.Spec.PodTemplate.Spec.Volumes {
 		if v.Name == "dev-config" {
 			cm = v.ConfigMap
 		}
@@ -365,12 +380,12 @@ func TestReconcileNoRuntimeClass(t *testing.T) {
 	objs := append([]client.Object{ownedNS(t, devNS), newPen()}, devObjects(devNS)...)
 	c := newClient(t, objs...)
 	reconcileOnceWith(t, c, devNS, cfg)
-	pod := &corev1.Pod{}
-	if err := c.Get(context.Background(), types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, pod); err != nil {
+	sandbox := &v1beta1.Sandbox{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, sandbox); err != nil {
 		t.Fatal(err)
 	}
-	if pod.Spec.RuntimeClassName != nil {
-		t.Errorf("pod runtimeClass = %q, want none", *pod.Spec.RuntimeClassName)
+	if sandbox.Spec.PodTemplate.Spec.RuntimeClassName != nil {
+		t.Errorf("sandbox runtimeClass = %q, want none", *sandbox.Spec.PodTemplate.Spec.RuntimeClassName)
 	}
 }
 
@@ -382,18 +397,18 @@ func TestReconcileCustomRuntimeClass(t *testing.T) {
 	objs := append([]client.Object{ownedNS(t, devNS), newPen()}, devObjects(devNS)...)
 	c := newClient(t, objs...)
 	reconcileOnceWith(t, c, devNS, cfg)
-	pod := &corev1.Pod{}
-	if err := c.Get(context.Background(), types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, pod); err != nil {
+	sandbox := &v1beta1.Sandbox{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, sandbox); err != nil {
 		t.Fatal(err)
 	}
-	if pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName != "gvisor" {
-		t.Errorf("pod runtimeClass = %v, want gvisor", pod.Spec.RuntimeClassName)
+	if sandbox.Spec.PodTemplate.Spec.RuntimeClassName == nil || *sandbox.Spec.PodTemplate.Spec.RuntimeClassName != "gvisor" {
+		t.Errorf("sandbox runtimeClass = %v, want gvisor", sandbox.Spec.PodTemplate.Spec.RuntimeClassName)
 	}
 }
 
 func TestReconcileReady(t *testing.T) {
 	objs := append([]client.Object{
-		ownedNS(t, devNS), newPen(), readyPod(), svcWithIngress("tobias-smoke.ts.example.net", ""),
+		ownedNS(t, devNS), newPen(), readySandbox(), svcWithIngress("tobias-smoke.ts.example.net", ""),
 	}, devObjects(devNS)...)
 	c := newClient(t, objs...)
 	res := reconcileOnce(t, c)
@@ -418,7 +433,7 @@ func TestReconcileReady(t *testing.T) {
 
 func TestReconcileIPFallback(t *testing.T) {
 	objs := append([]client.Object{
-		ownedNS(t, devNS), newPen(), readyPod(), svcWithIngress("", "100.64.0.9"),
+		ownedNS(t, devNS), newPen(), readySandbox(), svcWithIngress("", "100.64.0.9"),
 	}, devObjects(devNS)...)
 	c := newClient(t, objs...)
 	reconcileOnce(t, c)
@@ -455,13 +470,13 @@ func TestReconcilePrefixedNamespace(t *testing.T) {
 	if err := c.Get(ctx, types.NamespacedName{Name: penName, Namespace: ns}, svc); err != nil {
 		t.Fatalf("service not created in %s: %v", ns, err)
 	}
-	pod := &corev1.Pod{}
-	if err := c.Get(ctx, types.NamespacedName{Name: "env-" + penName, Namespace: ns}, pod); err != nil {
-		t.Fatalf("pod not created in %s: %v", ns, err)
+	sandbox := &v1beta1.Sandbox{}
+	if err := c.Get(ctx, types.NamespacedName{Name: "env-" + penName, Namespace: ns}, sandbox); err != nil {
+		t.Fatalf("sandbox not created in %s: %v", ns, err)
 	}
 
 	envs := map[string]string{}
-	for _, e := range pod.Spec.Containers[0].Env {
+	for _, e := range sandbox.Spec.PodTemplate.Spec.Containers[0].Env {
 		envs[e.Name] = e.Value
 	}
 	if envs["DEV_USER"] != devNS {
@@ -469,7 +484,7 @@ func TestReconcilePrefixedNamespace(t *testing.T) {
 	}
 	secVol := ""
 	cmVol := ""
-	for _, v := range pod.Spec.Volumes {
+	for _, v := range sandbox.Spec.PodTemplate.Spec.Volumes {
 		if v.Secret != nil {
 			secVol = v.Secret.SecretName
 		}
@@ -489,7 +504,7 @@ func TestReconcilePrefixedNamespace(t *testing.T) {
 		t.Fatalf("get pen: %v", err)
 	}
 	if p.Status.Phase != v1alpha1.PhaseCreating {
-		t.Errorf("phase = %q, want Creating (pod not ready yet)", p.Status.Phase)
+		t.Errorf("phase = %q, want Creating (sandbox not ready yet)", p.Status.Phase)
 	}
 	if res.RequeueAfter == 0 {
 		t.Error("expected requeue while creating")
@@ -528,8 +543,8 @@ func TestReconcileCreateErrorFails(t *testing.T) {
 		WithStatusSubresource(&v1alpha1.Pen{}).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
-				if _, ok := obj.(*corev1.Pod); ok {
-					return fmt.Errorf("forbidden: no raw pod create in this test")
+				if _, ok := obj.(*v1beta1.Sandbox); ok {
+					return fmt.Errorf("forbidden: no sandbox create in this test")
 				}
 				return c.Create(ctx, obj, opts...)
 			},
@@ -569,11 +584,11 @@ func TestReconcileSpecDefaultsAndOverride(t *testing.T) {
 	objs := append([]client.Object{ownedNS(t, devNS), pen}, devObjects(devNS)...)
 	c := newClient(t, objs...)
 	reconcileOnce(t, c)
-	pod := &corev1.Pod{}
-	if err := c.Get(context.Background(), types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, pod); err != nil {
+	sandbox := &v1beta1.Sandbox{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, sandbox); err != nil {
 		t.Fatal(err)
 	}
-	ctr := pod.Spec.Containers[0]
+	ctr := sandbox.Spec.PodTemplate.Spec.Containers[0]
 	if ctr.Resources.Requests.Cpu().String() != "8" {
 		t.Errorf("cpu = %s, want spec override 8", ctr.Resources.Requests.Cpu())
 	}
@@ -589,4 +604,1295 @@ func TestReconcileSpecDefaultsAndOverride(t *testing.T) {
 	}
 }
 
-// helper to avoid importing interceptor at file top in case of version drift
+// TestReconcileCreatesSandbox tests that the reconciler creates a Sandbox
+// instead of a Pod with the correct podTemplate.
+func TestReconcileCreatesSandbox(t *testing.T) {
+	objs := append([]client.Object{ownedNS(t, devNS), newPen()}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnce(t, c)
+	ctx := context.Background()
+
+	// Should create sandbox instead of pod
+	sandbox := &v1beta1.Sandbox{}
+	key := types.NamespacedName{Name: "env-" + penName, Namespace: devNS}
+	if err := c.Get(ctx, key, sandbox); err != nil {
+		t.Fatalf("sandbox not created: %v", err)
+	}
+
+	// Check podTemplate spec matches what ensurePod would have created
+	if sandbox.Spec.PodTemplate.Spec.RuntimeClassName != nil {
+		t.Errorf("podTemplate.spec.runtimeClassName = %v, want nil for empty runtime class", sandbox.Spec.PodTemplate.Spec.RuntimeClassName)
+	}
+	ctr := sandbox.Spec.PodTemplate.Spec.Containers[0]
+	if ctr.Image != "ghcr.io/caktus/pipen:latest" {
+		t.Errorf("podTemplate container image = %q, want cfg default", ctr.Image)
+	}
+	if ctr.Resources.Requests.Cpu().String() != "4" {
+		t.Errorf("podTemplate cpu = %s, want 4", ctr.Resources.Requests.Cpu())
+	}
+	envs := map[string]string{}
+	for _, e := range ctr.Env {
+		envs[e.Name] = e.Value
+	}
+	if envs["DEV_USER"] != devNS {
+		t.Errorf("DEV_USER = %q, want %q", envs["DEV_USER"], devNS)
+	}
+
+	// Check service is false by default
+	if sandbox.Spec.Service != nil && *sandbox.Spec.Service {
+		t.Errorf("spec.service = %v, want false or nil", sandbox.Spec.Service)
+	}
+
+	// Check operatingMode defaults to Running
+	if sandbox.Spec.OperatingMode != v1beta1.SandboxOperatingModeRunning {
+		t.Errorf("operatingMode = %q, want Running", sandbox.Spec.OperatingMode)
+	}
+
+	// Check no volumeClaimTemplates
+	if len(sandbox.Spec.VolumeClaimTemplates) != 0 {
+		t.Errorf("volumeClaimTemplates = %v, want empty", sandbox.Spec.VolumeClaimTemplates)
+	}
+
+	// Check controller reference
+	if len(sandbox.OwnerReferences) != 1 || sandbox.OwnerReferences[0].Kind != "Pen" {
+		t.Errorf("sandbox ownerRefs = %+v, want one Pen ownerRef", sandbox.OwnerReferences)
+	}
+}
+
+// TestReconcileSandboxServiceTrue tests sandbox creation with config.sandboxService = true.
+func TestReconcileSandboxServiceTrue(t *testing.T) {
+	cfg := testConfig()
+	cfg.SandboxService = true
+	objs := append([]client.Object{ownedNS(t, devNS), newPen()}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, cfg)
+	ctx := context.Background()
+
+	sandbox := &v1beta1.Sandbox{}
+	if err := c.Get(ctx, types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, sandbox); err != nil {
+		t.Fatalf("sandbox not created: %v", err)
+	}
+
+	if sandbox.Spec.Service == nil || !*sandbox.Spec.Service {
+		t.Errorf("spec.service = %v, want true", sandbox.Spec.Service)
+	}
+}
+
+// Helper to create a Sandbox with Ready condition
+func readySandbox() *v1beta1.Sandbox {
+	sb := &v1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "env-" + penName, Namespace: devNS},
+		Spec: v1beta1.SandboxSpec{
+			OperatingMode: v1beta1.SandboxOperatingModeRunning,
+			SandboxBlueprint: v1beta1.SandboxBlueprint{
+				PodTemplate: v1beta1.PodTemplate{
+					Spec: corev1.PodSpec{NodeName: "storage-1"},
+				},
+			},
+		},
+		Status: v1beta1.SandboxStatus{
+			NodeName: "storage-1",
+			Conditions: []metav1.Condition{{
+				Type:   string(v1beta1.SandboxConditionReady),
+				Status: metav1.ConditionTrue,
+				Reason: v1beta1.SandboxReasonDependenciesReady,
+			}},
+		},
+	}
+	return sb
+}
+
+// Helper to create a Sandbox with PodScheduled=False
+func unscheduledSandbox() *v1beta1.Sandbox {
+	sb := &v1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "env-" + penName, Namespace: devNS},
+		Status: v1beta1.SandboxStatus{
+			Conditions: []metav1.Condition{{
+				Type:    string(v1beta1.SandboxConditionPodScheduled),
+				Status:  metav1.ConditionFalse,
+				Reason:  "Unschedulable",
+				Message: "0/1 nodes are available",
+			}},
+		},
+	}
+	return sb
+}
+
+// Helper to create a Sandbox with Suspended condition
+func suspendedSandbox() *v1beta1.Sandbox {
+	sb := &v1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "env-" + penName, Namespace: devNS},
+		Spec: v1beta1.SandboxSpec{
+			OperatingMode: v1beta1.SandboxOperatingModeSuspended,
+		},
+		Status: v1beta1.SandboxStatus{
+			Conditions: []metav1.Condition{{
+				Type:   string(v1beta1.SandboxConditionSuspended),
+				Status: metav1.ConditionTrue,
+				Reason: v1beta1.SandboxReasonSuspendedPodTerminated,
+			}},
+		},
+	}
+	return sb
+}
+
+// TestReconcilePausedMapsToSuspended tests that pen.Spec.Paused maps to operatingMode Suspended.
+func TestReconcilePausedMapsToSuspended(t *testing.T) {
+	pen := newPen()
+	pen.Spec.Paused = true
+	objs := append([]client.Object{ownedNS(t, devNS), pen}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnce(t, c)
+	ctx := context.Background()
+
+	sandbox := &v1beta1.Sandbox{}
+	if err := c.Get(ctx, types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, sandbox); err != nil {
+		t.Fatalf("sandbox not created: %v", err)
+	}
+
+	if sandbox.Spec.OperatingMode != v1beta1.SandboxOperatingModeSuspended {
+		t.Errorf("operatingMode = %q, want Suspended", sandbox.Spec.OperatingMode)
+	}
+}
+
+// TestReconcileTTL tests that pen.Spec.TTL sets sandbox lifecycle.
+func TestReconcileTTL(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "1h"
+	objs := append([]client.Object{ownedNS(t, devNS), pen}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnce(t, c)
+	ctx := context.Background()
+
+	sandbox := &v1beta1.Sandbox{}
+	if err := c.Get(ctx, types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, sandbox); err != nil {
+		t.Fatalf("sandbox not created: %v", err)
+	}
+
+	if sandbox.Spec.ShutdownTime == nil {
+		t.Error("shutdownTime not set")
+	}
+	if sandbox.Spec.ShutdownPolicy == nil || *sandbox.Spec.ShutdownPolicy != v1beta1.ShutdownPolicyRetain {
+		t.Errorf("shutdownPolicy = %v, want Retain", sandbox.Spec.ShutdownPolicy)
+	}
+}
+
+// TestReconcileDefaultTTL tests that config.defaultTTL is used when pen.Spec.TTL empty.
+func TestReconcileDefaultTTL(t *testing.T) {
+	cfg := testConfig()
+	cfg.DefaultTTL = "2h"
+	pen := newPen()
+	objs := append([]client.Object{ownedNS(t, devNS), pen}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, cfg)
+	ctx := context.Background()
+
+	sandbox := &v1beta1.Sandbox{}
+	if err := c.Get(ctx, types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, sandbox); err != nil {
+		t.Fatalf("sandbox not created: %v", err)
+	}
+
+	if sandbox.Spec.ShutdownTime == nil {
+		t.Error("shutdownTime not set from defaultTTL")
+	}
+}
+
+// TestReconcilePenTTLOverridesDefault tests pen TTL overrides config default.
+func TestReconcilePenTTLOverridesDefault(t *testing.T) {
+	cfg := testConfig()
+	cfg.DefaultTTL = "2h"
+	pen := newPen()
+	pen.Spec.TTL = "30m"
+	objs := append([]client.Object{ownedNS(t, devNS), pen}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, cfg)
+	ctx := context.Background()
+
+	sandbox := &v1beta1.Sandbox{}
+	if err := c.Get(ctx, types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, sandbox); err != nil {
+		t.Fatalf("sandbox not created: %v", err)
+	}
+
+	if sandbox.Spec.ShutdownTime == nil {
+		t.Error("shutdownTime not set")
+	}
+}
+
+// TestReconcileInvalidTTLFails tests invalid TTL duration fails.
+func TestReconcileInvalidTTLFails(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "not-a-duration"
+	objs := append([]client.Object{ownedNS(t, devNS), pen}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnce(t, c)
+	p := getPen(t, c)
+	if p.Status.Phase != v1alpha1.PhaseFailed {
+		t.Errorf("phase = %q, want Failed for invalid TTL", p.Status.Phase)
+	}
+	if !strings.Contains(p.Status.Message, "invalid TTL") {
+		t.Errorf("message = %q, want 'invalid TTL'", p.Status.Message)
+	}
+}
+
+// TestReconcileSuspendedSandboxStatus tests that a suspended sandbox
+// reports PhaseSuspended in pen status.
+func TestReconcileSuspendedSandboxStatus(t *testing.T) {
+	pen := newPen()
+	pen.Spec.Paused = true
+	suspendedSB := suspendedSandbox()
+	objs := append([]client.Object{ownedNS(t, devNS), pen, suspendedSB, svcWithIngress("", "")}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnce(t, c)
+	p := getPen(t, c)
+	if p.Status.Phase != v1alpha1.PhaseSuspended {
+		t.Errorf("phase = %q, want Suspended", p.Status.Phase)
+	}
+}
+
+// TestReconcileSandboxReconcilerErrorFails tests that a sandbox
+// ReconcilerError condition fails the pen with the sandbox message.
+func TestReconcileSandboxReconcilerErrorFails(t *testing.T) {
+	sandbox := &v1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "env-" + penName, Namespace: devNS},
+		Status: v1beta1.SandboxStatus{Conditions: []metav1.Condition{{
+			Type:    string(v1beta1.SandboxConditionReady),
+			Status:  metav1.ConditionFalse,
+			Reason:  v1beta1.SandboxReasonReconcilerError,
+			Message: "sandbox pod creation failed",
+		}}},
+	}
+	objs := append([]client.Object{ownedNS(t, devNS), newPen(), sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnce(t, c)
+	p := getPen(t, c)
+	if p.Status.Phase != v1alpha1.PhaseFailed {
+		t.Errorf("phase = %q, want Failed", p.Status.Phase)
+	}
+	if p.Status.Message != "sandbox pod creation failed" {
+		t.Errorf("message = %q, want sandbox error", p.Status.Message)
+	}
+}
+
+// TestReconcileSandboxInvalidConfigurationFails tests that the permanent
+// InvalidConfiguration reason fails the pen (no retry loop).
+func TestReconcileSandboxInvalidConfigurationFails(t *testing.T) {
+	sandbox := &v1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "env-" + penName, Namespace: devNS},
+		Status: v1beta1.SandboxStatus{Conditions: []metav1.Condition{{
+			Type:    string(v1beta1.SandboxConditionReady),
+			Status:  metav1.ConditionFalse,
+			Reason:  v1beta1.SandboxReasonInvalidConfiguration,
+			Message: "invalid pod template",
+		}}},
+	}
+	objs := append([]client.Object{ownedNS(t, devNS), newPen(), sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnce(t, c)
+	p := getPen(t, c)
+	if p.Status.Phase != v1alpha1.PhaseFailed {
+		t.Errorf("phase = %q, want Failed", p.Status.Phase)
+	}
+	if p.Status.Message != "invalid pod template" {
+		t.Errorf("message = %q, want sandbox error", p.Status.Message)
+	}
+}
+
+func TestReconcileUnscheduledSandboxCreates(t *testing.T) {
+	objs := append([]client.Object{ownedNS(t, devNS), newPen(), unscheduledSandbox()}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	res := reconcileOnce(t, c)
+	p := getPen(t, c)
+	if p.Status.Phase != v1alpha1.PhaseCreating {
+		t.Errorf("phase = %q, want Creating", p.Status.Phase)
+	}
+	if p.Status.Message != "0/1 nodes are available" {
+		t.Errorf("message = %q, want scheduler message", p.Status.Message)
+	}
+	if res.RequeueAfter != requeueCreating {
+		t.Errorf("RequeueAfter = %v, want %v", res.RequeueAfter, requeueCreating)
+	}
+}
+
+func TestReconcileTTLUsesFixedClock(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "1h"
+	objs := append([]client.Object{ownedNS(t, devNS), pen}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, testConfig())
+	sandbox := getSandbox(t, c)
+	want := "2026-11-24T09:00:00Z"
+	if got := sandbox.Spec.ShutdownTime.UTC().Format(time.RFC3339); got != want {
+		t.Errorf("shutdownTime = %q, want %q", got, want)
+	}
+	if got := sandbox.Annotations[effectiveTTLAnnotation]; got != "1h" {
+		t.Errorf("effective TTL = %q, want 1h", got)
+	}
+}
+
+func TestReconcileTTLChangeResetsShutdownTime(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "2h"
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 9, 0, 0, 0, time.UTC))
+	sandbox := sandboxWithTTL("1h", &oldTime)
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, testConfig())
+	got := getSandbox(t, c)
+	want := "2026-11-24T10:00:00Z"
+	if got.Spec.ShutdownTime.UTC().Format(time.RFC3339) != want {
+		t.Errorf("shutdownTime = %v, want %s", got.Spec.ShutdownTime, want)
+	}
+	if got.Annotations[effectiveTTLAnnotation] != "2h" {
+		t.Errorf("effective TTL = %q, want 2h", got.Annotations[effectiveTTLAnnotation])
+	}
+}
+
+func TestReconcileUnchangedTTLKeepsShutdownTime(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "1h"
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 9, 0, 0, 0, time.UTC))
+	sandbox := sandboxWithTTL("1h", &oldTime)
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	for i := 0; i < 2; i++ {
+		reconcileOnceAt(t, c, devNS, testConfig(), time.Date(2026, 11, 24, 8+i, 0, 0, 0, time.UTC))
+	}
+	got := getSandbox(t, c)
+	if !got.Spec.ShutdownTime.Equal(&oldTime) {
+		t.Errorf("shutdownTime = %v, want unchanged %v", got.Spec.ShutdownTime, oldTime)
+	}
+	if got.ResourceVersion != sandbox.ResourceVersion {
+		t.Errorf("sandbox updated on unchanged TTL: resourceVersion %q, want %q", got.ResourceVersion, sandbox.ResourceVersion)
+	}
+}
+
+func TestReconcileRemovedTTLClearsLifecycle(t *testing.T) {
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 9, 0, 0, 0, time.UTC))
+	sandbox := sandboxWithTTL("1h", &oldTime)
+	retain := v1beta1.ShutdownPolicyRetain
+	sandbox.Spec.ShutdownPolicy = &retain
+	objs := append([]client.Object{ownedNS(t, devNS), newPen(), sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, testConfig())
+	got := getSandbox(t, c)
+	if got.Spec.ShutdownTime != nil || got.Spec.ShutdownPolicy != nil {
+		t.Errorf("lifecycle = %+v, want empty", got.Spec.Lifecycle)
+	}
+	if got.Annotations[effectiveTTLAnnotation] != "" {
+		t.Errorf("effective TTL = %q, want empty", got.Annotations[effectiveTTLAnnotation])
+	}
+}
+
+func TestReconcileExpiredSandboxResetsShutdownTimeAtFixedClock(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "1h"
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 7, 0, 0, 0, time.UTC))
+	sandbox := sandboxWithTTL("1h", &oldTime)
+	sandbox.Status.Conditions = []metav1.Condition{{
+		Type: string(v1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: v1beta1.SandboxReasonExpired,
+	}}
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, testConfig())
+	got := getSandbox(t, c)
+	want := "2026-11-24T09:00:00Z"
+	if got.Spec.ShutdownTime.UTC().Format(time.RFC3339) != want {
+		t.Errorf("shutdownTime = %v, want %s", got.Spec.ShutdownTime, want)
+	}
+}
+
+// TestReconcileResumeFromSuspendedResetsShutdownTime: pause then resume
+// with an unchanged TTL must stamp a fresh shutdownTime. Without it, the
+// agent-sandbox controller expires the pod again right after resume when
+// the old shutdownTime is already in the past.
+func TestReconcileResumeFromSuspendedResetsShutdownTime(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "1h"
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 7, 0, 0, 0, time.UTC))
+	sandbox := suspendedSandboxWithTTL("1h", &oldTime)
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, testConfig())
+	got := getSandbox(t, c)
+	if got.Spec.OperatingMode != v1beta1.SandboxOperatingModeRunning {
+		t.Errorf("operatingMode = %q, want Running", got.Spec.OperatingMode)
+	}
+	want := "2026-11-24T09:00:00Z"
+	if got.Spec.ShutdownTime.UTC().Format(time.RFC3339) != want {
+		t.Errorf("shutdownTime = %v, want fresh %s", got.Spec.ShutdownTime, want)
+	}
+}
+
+// TestReconcileResumeStampsOnce: the fresh shutdownTime from the resume
+// must survive later plain reconciles, not move on every pass (the
+// update-every-reconcile loop fixed in the TTL reset change).
+func TestReconcileResumeStampsOnce(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "1h"
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 7, 0, 0, 0, time.UTC))
+	sandbox := suspendedSandboxWithTTL("1h", &oldTime)
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceAt(t, c, devNS, testConfig(), time.Date(2026, 11, 24, 8, 0, 0, 0, time.UTC))
+	resumed := getSandbox(t, c)
+	if resumed.Spec.ShutdownTime.UTC().Format(time.RFC3339) != "2026-11-24T09:00:00Z" {
+		t.Fatalf("shutdownTime = %v, want fresh 2026-11-24T09:00:00Z", resumed.Spec.ShutdownTime)
+	}
+	for i := 1; i <= 2; i++ {
+		reconcileOnceAt(t, c, devNS, testConfig(), time.Date(2026, 11, 24, 8+i, 0, 0, 0, time.UTC))
+		got := getSandbox(t, c)
+		if !got.Spec.ShutdownTime.Equal(resumed.Spec.ShutdownTime) {
+			t.Errorf("reconcile %d: shutdownTime = %v, want unchanged %v",
+				i, got.Spec.ShutdownTime, resumed.Spec.ShutdownTime)
+		}
+		if got.ResourceVersion != resumed.ResourceVersion {
+			t.Errorf("reconcile %d: sandbox updated: resourceVersion %q, want %q",
+				i, got.ResourceVersion, resumed.ResourceVersion)
+		}
+	}
+}
+
+func getSandbox(t *testing.T, c client.Client) *v1beta1.Sandbox {
+	t.Helper()
+	sandbox := &v1beta1.Sandbox{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, sandbox); err != nil {
+		t.Fatal(err)
+	}
+	return sandbox
+}
+
+// containerResources builds the env container requests and limits (equal
+// values) from cpu and memory strings.
+func containerResources(cpu, memory string) corev1.ResourceRequirements {
+	parse := func(s string) resource.Quantity {
+		q, err := resource.ParseQuantity(s)
+		if err != nil {
+			panic(err)
+		}
+		return q
+	}
+	res := corev1.ResourceList{
+		corev1.ResourceCPU:    parse(cpu),
+		corev1.ResourceMemory: parse(memory),
+	}
+	return corev1.ResourceRequirements{Requests: res, Limits: res}
+}
+
+// sandboxWithEnvResources is a running sandbox with the env container
+// (cpu and memory requests and limits), the stored effective TTL
+// annotation, and a matching service.
+func sandboxWithEnvResources(ttl string, shutdownTime *metav1.Time, cpu, memory string) *v1beta1.Sandbox {
+	sb := sandboxWithTTL(ttl, shutdownTime)
+	sb.Spec.PodTemplate.Spec.Containers = []corev1.Container{{
+		Name:      "env",
+		Resources: containerResources(cpu, memory),
+	}}
+	return sb
+}
+
+// TestReconcileUnchangedResourcesIsNoOp: an unchanged spec must not touch
+// the sandbox. This pins the update-once behavior of the converge path.
+func TestReconcileUnchangedResourcesIsNoOp(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "1h"
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 9, 0, 0, 0, time.UTC))
+	sandbox := sandboxWithEnvResources("1h", &oldTime, "4", "8Gi")
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, testConfig())
+	got := getSandbox(t, c)
+	if got.ResourceVersion != sandbox.ResourceVersion {
+		t.Errorf("sandbox updated on unchanged spec: resourceVersion %q, want %q", got.ResourceVersion, sandbox.ResourceVersion)
+	}
+}
+
+// TestReconcileResourceMismatchPatchesTemplateAndSuspends: a cpu or
+// memory resize (an explicit spec value) patches the stored podTemplate
+// and sets the sandbox to Suspended, so the sandbox controller deletes
+// the pod and starts one from the new template.
+func TestReconcileResourceMismatchPatchesTemplateAndSuspends(t *testing.T) {
+	pen := newPen()
+	pen.Spec.CPU = "4"
+	pen.Spec.Memory = "8Gi"
+	pen.Spec.TTL = "1h"
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 9, 0, 0, 0, time.UTC))
+	sandbox := sandboxWithEnvResources("1h", &oldTime, "2", "4Gi")
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, testConfig())
+	got := getSandbox(t, c)
+	ctr := got.Spec.PodTemplate.Spec.Containers[0]
+	if ctr.Resources.Requests.Cpu().String() != "4" || ctr.Resources.Limits.Cpu().String() != "4" {
+		t.Errorf("cpu req/lim = %v/%v, want 4/4", ctr.Resources.Requests[corev1.ResourceCPU], ctr.Resources.Limits[corev1.ResourceCPU])
+	}
+	if ctr.Resources.Requests.Memory().String() != "8Gi" || ctr.Resources.Limits.Memory().String() != "8Gi" {
+		t.Errorf("memory req/lim = %v/%v, want 8Gi/8Gi", ctr.Resources.Requests[corev1.ResourceMemory], ctr.Resources.Limits[corev1.ResourceMemory])
+	}
+	if got.Spec.OperatingMode != v1beta1.SandboxOperatingModeSuspended {
+		t.Errorf("operatingMode = %q, want Suspended", got.Spec.OperatingMode)
+	}
+}
+
+// TestReconcilePausedPenGetsTemplateWithoutModeChange: a paused pen whose
+// size changes gets the podTemplate update only. The sandbox stays in its
+// current Suspended mode.
+func TestReconcilePausedPenGetsTemplateWithoutModeChange(t *testing.T) {
+	pen := newPen()
+	pen.Spec.Paused = true
+	pen.Spec.CPU = "4"
+	pen.Spec.Memory = "8Gi"
+	pen.Spec.TTL = "1h"
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 9, 0, 0, 0, time.UTC))
+	sandbox := sandboxWithEnvResources("1h", &oldTime, "2", "4Gi")
+	sandbox.Spec.OperatingMode = v1beta1.SandboxOperatingModeSuspended
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, testConfig())
+	got := getSandbox(t, c)
+	ctr := got.Spec.PodTemplate.Spec.Containers[0]
+	if ctr.Resources.Requests.Cpu().String() != "4" || ctr.Resources.Limits.Cpu().String() != "4" {
+		t.Errorf("cpu req/lim = %v/%v, want 4/4", ctr.Resources.Requests[corev1.ResourceCPU], ctr.Resources.Limits[corev1.ResourceCPU])
+	}
+	if ctr.Resources.Requests.Memory().String() != "8Gi" || ctr.Resources.Limits.Memory().String() != "8Gi" {
+		t.Errorf("memory req/lim = %v/%v, want 8Gi/8Gi", ctr.Resources.Requests[corev1.ResourceMemory], ctr.Resources.Limits[corev1.ResourceMemory])
+	}
+	if got.Spec.OperatingMode != v1beta1.SandboxOperatingModeSuspended {
+		t.Errorf("operatingMode = %q, want Suspended (no mode change for a paused pen)", got.Spec.OperatingMode)
+	}
+}
+
+// TestReconcileConfigChangeDoesNotMoveEmptySpecPen: the config defaults
+// feed pens created afterwards only. A pen that pins no cpu, memory or
+// home size keeps the size it was created with when the config changes.
+func TestReconcileConfigChangeDoesNotMoveEmptySpecPen(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "1h"
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 9, 0, 0, 0, time.UTC))
+	sandbox := sandboxWithEnvResources("1h", &oldTime, "4", "8Gi")
+	pvc := homePVC("10Gi", "10Gi", "mayastor-2")
+	cfg := testConfig()
+	cfg.CPU = "8"
+	cfg.Memory = "16Gi"
+	cfg.HomeSize = "20Gi"
+	objs := []client.Object{ownedNS(t, devNS), pen, sandbox, pvc, storageClassObj(true), svcWithIngress("", "")}
+	objs = append(objs, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, cfg)
+	gotPVC := getHomePVC(t, c)
+	if gotPVC.ResourceVersion != pvc.ResourceVersion {
+		t.Errorf("pvc updated on config change: resourceVersion %q, want %q", gotPVC.ResourceVersion, pvc.ResourceVersion)
+	}
+	if _, ok := gotPVC.Annotations[homeExpandAnnotationKey]; ok {
+		t.Error("expand stamp set on a config change, want none")
+	}
+	if gotPVC.Spec.Resources.Requests.Storage().String() != "10Gi" {
+		t.Errorf("pvc size = %s, want unchanged 10Gi", gotPVC.Spec.Resources.Requests.Storage())
+	}
+	got := getSandbox(t, c)
+	if got.ResourceVersion != sandbox.ResourceVersion {
+		t.Errorf("sandbox updated on config change: resourceVersion %q, want %q", got.ResourceVersion, sandbox.ResourceVersion)
+	}
+	if got.Spec.OperatingMode != v1beta1.SandboxOperatingModeRunning {
+		t.Errorf("operatingMode = %q, want Running (no mode change)", got.Spec.OperatingMode)
+	}
+	ctr := got.Spec.PodTemplate.Spec.Containers[0]
+	if ctr.Resources.Requests.Cpu().String() != "4" || ctr.Resources.Limits.Cpu().String() != "4" {
+		t.Errorf("cpu req/lim = %v/%v, want unchanged 4/4", ctr.Resources.Requests[corev1.ResourceCPU], ctr.Resources.Limits[corev1.ResourceCPU])
+	}
+	if ctr.Resources.Requests.Memory().String() != "8Gi" || ctr.Resources.Limits.Memory().String() != "8Gi" {
+		t.Errorf("memory req/lim = %v/%v, want unchanged 8Gi/8Gi", ctr.Resources.Requests[corev1.ResourceMemory], ctr.Resources.Limits[corev1.ResourceMemory])
+	}
+	p := getPen(t, c)
+	if p.Status.Phase == v1alpha1.PhaseFailed {
+		t.Errorf("phase = %q, want not Failed (message %q)", p.Status.Phase, p.Status.Message)
+	}
+}
+
+// suspendedSandboxWithTTL is a suspended sandbox after the pod is gone:
+// operatingMode Suspended, an existing shutdownTime, the stored effective
+// TTL annotation, and the Suspended condition True with reason
+// PodTerminated.
+func suspendedSandboxWithTTL(ttl string, shutdownTime *metav1.Time) *v1beta1.Sandbox {
+	sb := sandboxWithTTL(ttl, shutdownTime)
+	sb.Spec.OperatingMode = v1beta1.SandboxOperatingModeSuspended
+	sb.Status.Conditions = []metav1.Condition{{
+		Type:   string(v1beta1.SandboxConditionSuspended),
+		Status: metav1.ConditionTrue,
+		Reason: v1beta1.SandboxReasonSuspendedPodTerminated,
+	}}
+	return sb
+}
+
+// TestReconcileTerminatingPodDoesNotFlip: while the pod is still
+// terminating (Suspended condition reason PodTerminating), the reconcile
+// keeps the sandbox Suspended and does not re-stamp the TTL.
+func TestReconcileTerminatingPodDoesNotFlip(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "1h"
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 7, 0, 0, 0, time.UTC))
+	sandbox := suspendedSandboxWithTTL("1h", &oldTime)
+	sandbox.Status.Conditions[0].Reason = v1beta1.SandboxReasonSuspendedPodTerminating
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceAt(t, c, devNS, testConfig(), time.Date(2026, 11, 24, 8, 0, 0, 0, time.UTC))
+	got := getSandbox(t, c)
+	if got.Spec.OperatingMode != v1beta1.SandboxOperatingModeSuspended {
+		t.Errorf("operatingMode = %q, want Suspended while the pod is still terminating", got.Spec.OperatingMode)
+	}
+	if !got.Spec.ShutdownTime.Equal(&oldTime) {
+		t.Errorf("shutdownTime = %v, want unchanged %v (no re-stamp)", got.Spec.ShutdownTime, oldTime)
+	}
+	if got.ResourceVersion != sandbox.ResourceVersion {
+		t.Errorf("sandbox updated: resourceVersion %q, want %q", got.ResourceVersion, sandbox.ResourceVersion)
+	}
+}
+
+// TestReconcileResumeFlipsToRunningAndRequeues: the resize flip. An
+// unpaused pen, a Suspended sandbox whose pod is gone. The reconcile
+// flips the sandbox back to Running and must requeue: the operator
+// watches no Sandbox, so only a requeue lets the pen observe the flip.
+func TestReconcileResumeFlipsToRunningAndRequeues(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "1h"
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 7, 0, 0, 0, time.UTC))
+	sandbox := suspendedSandboxWithTTL("1h", &oldTime)
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	res := reconcileOnceAt(t, c, devNS, testConfig(), time.Date(2026, 11, 24, 8, 0, 0, 0, time.UTC))
+	got := getSandbox(t, c)
+	if got.Spec.OperatingMode != v1beta1.SandboxOperatingModeRunning {
+		t.Errorf("operatingMode = %q, want Running after the flip", got.Spec.OperatingMode)
+	}
+	if res.RequeueAfter != requeueCreating {
+		t.Errorf("RequeueAfter = %v, want %v so the flip is observed", res.RequeueAfter, requeueCreating)
+	}
+}
+
+// TestReconcilePausedPenInSuspendedStateDoesNotFlip: a user-paused pen in
+// the same state keeps the sandbox Suspended (the gate holds) and writes
+// no spec, but still paces at the 10s requeue.
+func TestReconcilePausedPenInSuspendedStateDoesNotFlip(t *testing.T) {
+	pen := newPen()
+	pen.Spec.Paused = true
+	pen.Spec.TTL = "1h"
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 7, 0, 0, 0, time.UTC))
+	sandbox := suspendedSandboxWithTTL("1h", &oldTime)
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	res := reconcileOnceAt(t, c, devNS, testConfig(), time.Date(2026, 11, 24, 8, 0, 0, 0, time.UTC))
+	got := getSandbox(t, c)
+	if got.Spec.OperatingMode != v1beta1.SandboxOperatingModeSuspended {
+		t.Errorf("operatingMode = %q, want Suspended (gate holds for a paused pen)", got.Spec.OperatingMode)
+	}
+	if got.ResourceVersion != sandbox.ResourceVersion {
+		t.Errorf("sandbox updated: resourceVersion %q, want %q", got.ResourceVersion, sandbox.ResourceVersion)
+	}
+	if res.RequeueAfter != requeueCreating {
+		t.Errorf("RequeueAfter = %v, want %v (a paused pen paces)", res.RequeueAfter, requeueCreating)
+	}
+	if p := getPen(t, c); p.Spec != pen.Spec {
+		t.Errorf("pen spec = %+v, want unchanged %+v", p.Spec, pen.Spec)
+	}
+}
+
+func sandboxWithTTL(ttl string, shutdownTime *metav1.Time) *v1beta1.Sandbox {
+	service := false
+	return &v1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "env-" + penName, Namespace: devNS,
+			Annotations: map[string]string{effectiveTTLAnnotation: ttl},
+		},
+		Spec: v1beta1.SandboxSpec{
+			SandboxBlueprint: v1beta1.SandboxBlueprint{Service: &service},
+			OperatingMode:    v1beta1.SandboxOperatingModeRunning,
+			Lifecycle:        v1beta1.Lifecycle{ShutdownTime: shutdownTime},
+		},
+	}
+}
+
+func egressPolicy(t *testing.T, c client.Client) *networkingv1.NetworkPolicy {
+	t.Helper()
+	policy := &networkingv1.NetworkPolicy{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: penName + "-egress", Namespace: devNS}, policy); err != nil {
+		t.Fatalf("egress NetworkPolicy not created: %v", err)
+	}
+	return policy
+}
+
+// A pen with spec.egress and configured hosts gets an egress policy that
+// selects its pod, allows only DNS and the configured hosts, and is owned
+// by the Pen.
+func TestReconcileEgressNetworkPolicy(t *testing.T) {
+	pen := newPen()
+	pen.Spec.Egress = true
+	cfg := testConfig()
+	cfg.EgressHosts = []string{"llm.example.net", "proxy.golang.org"}
+	objs := append([]client.Object{ownedNS(t, devNS), pen}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, cfg)
+
+	policy := egressPolicy(t, c)
+	if len(policy.OwnerReferences) != 1 || policy.OwnerReferences[0].Kind != "Pen" || policy.OwnerReferences[0].Name != penName {
+		t.Errorf("ownerRefs = %+v, want one Pen controller ref", policy.OwnerReferences)
+	}
+	if policy.OwnerReferences[0].Controller == nil || !*policy.OwnerReferences[0].Controller {
+		t.Error("ownerRef is not a controller ref")
+	}
+	if got := policy.Spec.PodSelector.MatchLabels; got[ownerLabel] != penName || len(got) != 1 {
+		t.Errorf("podSelector = %v, want %s=%s only", got, ownerLabel, penName)
+	}
+	if len(policy.Spec.PolicyTypes) != 1 || policy.Spec.PolicyTypes[0] != networkingv1.PolicyTypeEgress {
+		t.Errorf("policyTypes = %v, want [Egress]", policy.Spec.PolicyTypes)
+	}
+	if len(policy.Spec.Egress) != 3 {
+		t.Fatalf("egress rules = %d, want 3 (DNS + 2 hosts)", len(policy.Spec.Egress))
+	}
+
+	// Rule 1 is the kube-dns rule from the dev-namespace chart.
+	dns := policy.Spec.Egress[0]
+	if len(dns.To) != 1 {
+		t.Fatalf("DNS rule peers = %d, want 1", len(dns.To))
+	}
+	peer := dns.To[0]
+	if peer.IPBlock != nil {
+		t.Error("DNS rule must select kube-dns pods, not an ipBlock")
+	}
+	if peer.NamespaceSelector == nil || peer.NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] != "kube-system" {
+		t.Errorf("DNS namespaceSelector = %v, want kubernetes.io/metadata.name=kube-system", peer.NamespaceSelector)
+	}
+	if peer.PodSelector == nil || peer.PodSelector.MatchLabels["k8s-app"] != "kube-dns" {
+		t.Errorf("DNS podSelector = %v, want k8s-app=kube-dns", peer.PodSelector)
+	}
+	if len(dns.Ports) != 2 {
+		t.Fatalf("DNS ports = %d, want 2 (TCP and UDP 53)", len(dns.Ports))
+	}
+	for i, protocol := range []corev1.Protocol{corev1.ProtocolTCP, corev1.ProtocolUDP} {
+		if dns.Ports[i].Protocol == nil || *dns.Ports[i].Protocol != protocol {
+			t.Errorf("DNS port %d protocol = %v, want %s", i, dns.Ports[i].Protocol, protocol)
+		}
+		if dns.Ports[i].Port == nil || dns.Ports[i].Port.IntValue() != 53 {
+			t.Errorf("DNS port %d = %v, want 53", i, dns.Ports[i].Port)
+		}
+	}
+
+	// One ipBlock rule per configured host, in config order.
+	for i, host := range []string{"llm.example.net", "proxy.golang.org"} {
+		rule := policy.Spec.Egress[i+1]
+		if len(rule.To) != 1 || rule.To[0].IPBlock == nil {
+			t.Fatalf("rule %d = %+v, want one ipBlock peer", i+1, rule)
+		}
+		if rule.To[0].IPBlock.CIDR != host {
+			t.Errorf("rule %d cidr = %q, want %q", i+1, rule.To[0].IPBlock.CIDR, host)
+		}
+		if len(rule.Ports) != 0 {
+			t.Errorf("rule %d ports = %v, want all ports", i+1, rule.Ports)
+		}
+	}
+}
+
+// A changed host list must replace the old allow rules. An unchanged list
+// must not update the policy again.
+func TestReconcileEgressPolicyConvergesHostChanges(t *testing.T) {
+	pen := newPen()
+	pen.Spec.Egress = true
+	cfg := testConfig()
+	cfg.EgressHosts = []string{"a.example"}
+	objs := append([]client.Object{ownedNS(t, devNS), pen}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, cfg)
+
+	created := egressPolicy(t, c)
+	if got := created.Spec.Egress[1].To[0].IPBlock.CIDR; got != "a.example" {
+		t.Fatalf("initial host cidr = %q, want a.example", got)
+	}
+	reconcileOnceWith(t, c, devNS, cfg)
+	stable := egressPolicy(t, c)
+	if stable.ResourceVersion != created.ResourceVersion {
+		t.Errorf("unchanged hosts updated policy: resourceVersion %q, want %q", stable.ResourceVersion, created.ResourceVersion)
+	}
+
+	cfg.EgressHosts = []string{"b.example"}
+	reconcileOnceWith(t, c, devNS, cfg)
+	updated := egressPolicy(t, c)
+	if len(updated.Spec.Egress) != 2 {
+		t.Fatalf("egress rules = %d, want DNS and one host", len(updated.Spec.Egress))
+	}
+	if got := updated.Spec.Egress[1].To[0].IPBlock.CIDR; got != "b.example" {
+		t.Errorf("replacement host cidr = %q, want b.example", got)
+	}
+	if updated.ResourceVersion == created.ResourceVersion {
+		t.Error("changed hosts did not update policy resourceVersion")
+	}
+}
+
+func TestReconcileNoEgressNetworkPolicyByDefault(t *testing.T) {
+	pen := newPen()
+	cfg := testConfig()
+	cfg.EgressHosts = []string{"llm.example.net"}
+	objs := append([]client.Object{ownedNS(t, devNS), pen}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, cfg)
+	policy := &networkingv1.NetworkPolicy{}
+	err := c.Get(context.Background(), types.NamespacedName{Name: penName + "-egress", Namespace: devNS}, policy)
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("egress policy with spec.egress off: err = %v, want NotFound", err)
+	}
+}
+
+func TestReconcileNoEgressNetworkPolicyWithoutHosts(t *testing.T) {
+	pen := newPen()
+	pen.Spec.Egress = true
+	objs := append([]client.Object{ownedNS(t, devNS), pen}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnce(t, c)
+	policy := &networkingv1.NetworkPolicy{}
+	err := c.Get(context.Background(), types.NamespacedName{Name: penName + "-egress", Namespace: devNS}, policy)
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("egress policy with empty egressHosts: err = %v, want NotFound", err)
+	}
+}
+
+func TestReconcileEgressPolicyDeletedWhenFlagOff(t *testing.T) {
+	pen := newPen()
+	existing := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: penName + "-egress", Namespace: devNS},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{ownerLabel: penName}},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
+		},
+	}
+	cfg := testConfig()
+	cfg.EgressHosts = []string{"llm.example.net"}
+	objs := append([]client.Object{ownedNS(t, devNS), pen, existing}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, cfg)
+	policy := &networkingv1.NetworkPolicy{}
+	err := c.Get(context.Background(), types.NamespacedName{Name: penName + "-egress", Namespace: devNS}, policy)
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("egress policy after spec.egress off: err = %v, want NotFound (deleted)", err)
+	}
+}
+
+func TestReconcileEgressPolicyDeletedWhenHostsEmpty(t *testing.T) {
+	pen := newPen()
+	pen.Spec.Egress = true
+	existing := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: penName + "-egress", Namespace: devNS},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{ownerLabel: penName}},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
+		},
+	}
+	objs := append([]client.Object{ownedNS(t, devNS), pen, existing}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnce(t, c)
+	policy := &networkingv1.NetworkPolicy{}
+	err := c.Get(context.Background(), types.NamespacedName{Name: penName + "-egress", Namespace: devNS}, policy)
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("egress policy after egressHosts emptied: err = %v, want NotFound (deleted)", err)
+	}
+}
+
+func TestReconcileSandboxDeleteRecreatesPod(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "1h"
+	// Create a sandbox that will be deleted
+	sandbox := &v1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "env-" + penName, Namespace: devNS},
+		Spec: v1beta1.SandboxSpec{
+			OperatingMode: v1beta1.SandboxOperatingModeRunning,
+			SandboxBlueprint: v1beta1.SandboxBlueprint{
+				PodTemplate: v1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "env", Image: "old/image:old"}},
+					},
+				},
+			},
+		},
+	}
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+
+	// Delete the sandbox
+	if err := c.Delete(context.Background(), sandbox); err != nil {
+		t.Fatalf("delete sandbox: %v", err)
+	}
+
+	// Reconcile should recreate it
+	reconcileOnce(t, c)
+
+	// Verify sandbox was recreated with home PVC volume
+	newSandbox := &v1beta1.Sandbox{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, newSandbox); err != nil {
+		t.Fatalf("sandbox not recreated: %v", err)
+	}
+
+	// Check that home volume references the home PVC
+	hasHomeVolume := false
+	for _, vol := range newSandbox.Spec.PodTemplate.Spec.Volumes {
+		if vol.Name == "home" && vol.PersistentVolumeClaim != nil && vol.PersistentVolumeClaim.ClaimName == penName+"-home" {
+			hasHomeVolume = true
+			break
+		}
+	}
+	if !hasHomeVolume {
+		t.Error("recreated sandbox missing home PVC volume")
+	}
+
+	// Check that home PVC still exists (wasn't deleted)
+	pvc := &corev1.PersistentVolumeClaim{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: penName + "-home", Namespace: devNS}, pvc); err != nil {
+		t.Errorf("home PVC missing after sandbox recreation: %v", err)
+	}
+}
+
+// --- Home PVC expansion ---
+
+// homeExpandAnnotationKey is the wire key the operator stamps on a home
+// grow. The test pins the literal key, not the production constant, so a
+// rename cannot drift from the stored value.
+const homeExpandAnnotationKey = "pipen.dev/home-expand-at"
+
+func mustQty(s string) resource.Quantity {
+	q, err := resource.ParseQuantity(s)
+	if err != nil {
+		panic(err)
+	}
+	return q
+}
+
+// homePVC returns a home PVC with the given spec size and provisioned
+// capacity ("" for none yet). An empty scName leaves StorageClassName
+// unset, so the claim binds to the cluster default.
+func homePVC(size, capacity, scName string) *corev1.PersistentVolumeClaim {
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: penName + "-home", Namespace: devNS},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceStorage: mustQty(size)},
+			},
+		},
+	}
+	if capacity != "" {
+		pvc.Status.Capacity = corev1.ResourceList{corev1.ResourceStorage: mustQty(capacity)}
+	}
+	if scName != "" {
+		pvc.Spec.StorageClassName = &scName
+	}
+	return pvc
+}
+
+// storageClassObj returns the mayastor-2 StorageClass the test config
+// names, with the given AllowVolumeExpansion.
+func storageClassObj(allowExpansion bool) *storagev1.StorageClass {
+	return &storagev1.StorageClass{
+		ObjectMeta:           metav1.ObjectMeta{Name: "mayastor-2"},
+		AllowVolumeExpansion: &allowExpansion,
+	}
+}
+
+func getHomePVC(t *testing.T, c client.Client) *corev1.PersistentVolumeClaim {
+	t.Helper()
+	pvc := &corev1.PersistentVolumeClaim{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: penName + "-home", Namespace: devNS}, pvc); err != nil {
+		t.Fatalf("get home pvc: %v", err)
+	}
+	return pvc
+}
+
+// homeGrowObjects is the object set for a home-grow reconcile: a Ready
+// sandbox and service (so the pen can reach Ready), the given pen and
+// PVC, extra objects (for example a StorageClass), and the dev bootstrap
+// objects.
+func homeGrowObjects(t *testing.T, pen *v1alpha1.Pen, pvc *corev1.PersistentVolumeClaim, extra ...client.Object) []client.Object {
+	objs := []client.Object{
+		ownedNS(t, devNS), pen, pvc, readySandbox(),
+		svcWithIngress("tobias-smoke.ts.example.net", ""),
+	}
+	objs = append(objs, extra...)
+	return append(objs, devObjects(devNS)...)
+}
+
+// A larger homeSize patches the claim to the new size, stamps when the
+// grow started, and reports the grow in the pen status (still Ready).
+func TestHomeGrowPatchesPVCAndStampsAnnotation(t *testing.T) {
+	pen := newPen()
+	pen.Spec.HomeSize = "20Gi"
+	pvc := homePVC("10Gi", "10Gi", "mayastor-2")
+	c := newClient(t, homeGrowObjects(t, pen, pvc, storageClassObj(true))...)
+	reconcileOnceAt(t, c, devNS, testConfig(), time.Date(2026, 11, 24, 8, 0, 0, 0, time.UTC))
+
+	got := getHomePVC(t, c)
+	if got.Spec.Resources.Requests.Storage().String() != "20Gi" {
+		t.Errorf("pvc size = %s, want 20Gi", got.Spec.Resources.Requests.Storage())
+	}
+	if got.Annotations[homeExpandAnnotationKey] != "2026-11-24T08:00:00Z" {
+		t.Errorf("expand stamp = %q, want 2026-11-24T08:00:00Z", got.Annotations[homeExpandAnnotationKey])
+	}
+	p := getPen(t, c)
+	if p.Status.Phase != v1alpha1.PhaseReady || !p.Status.Ready {
+		t.Errorf("phase = %q ready = %v, want Ready/true while the grow is in flight", p.Status.Phase, p.Status.Ready)
+	}
+	if p.Status.Message != "growing home to 20Gi" {
+		t.Errorf("message = %q, want %q", p.Status.Message, "growing home to 20Gi")
+	}
+}
+
+// A smaller homeSize fails the pen; the claim is left untouched.
+func TestHomeShrinkFailsGrowOnly(t *testing.T) {
+	pen := newPen()
+	pen.Spec.HomeSize = "5Gi"
+	pvc := homePVC("10Gi", "10Gi", "mayastor-2")
+	c := newClient(t, homeGrowObjects(t, pen, pvc, storageClassObj(true))...)
+	reconcileOnce(t, c)
+	p := getPen(t, c)
+	if p.Status.Phase != v1alpha1.PhaseFailed {
+		t.Errorf("phase = %q, want Failed", p.Status.Phase)
+	}
+	if !strings.Contains(p.Status.Message, "home size can only grow") {
+		t.Errorf("message = %q, want 'home size can only grow'", p.Status.Message)
+	}
+	got := getHomePVC(t, c)
+	if got.Spec.Resources.Requests.Storage().String() != "10Gi" {
+		t.Errorf("pvc size = %s, want unchanged 10Gi", got.Spec.Resources.Requests.Storage())
+	}
+	if _, ok := got.Annotations[homeExpandAnnotationKey]; ok {
+		t.Error("expand stamp set on a shrink, want none")
+	}
+}
+
+// A storage class that does not allow expansion fails the pen and names
+// the class; the claim is left untouched. A missing class fails with a
+// read message (the class is absent, not disallowed), the same way.
+func TestHomeGrowFailsWhenStorageClassDisallows(t *testing.T) {
+	run := func(t *testing.T, sc *storagev1.StorageClass, wantMsg string) {
+		pen := newPen()
+		pen.Spec.HomeSize = "20Gi"
+		pvc := homePVC("10Gi", "10Gi", "mayastor-2")
+		var extra []client.Object
+		if sc != nil {
+			extra = append(extra, sc)
+		}
+		c := newClient(t, homeGrowObjects(t, pen, pvc, extra...)...)
+		reconcileOnce(t, c)
+		p := getPen(t, c)
+		if p.Status.Phase != v1alpha1.PhaseFailed {
+			t.Errorf("phase = %q, want Failed", p.Status.Phase)
+		}
+		if !strings.Contains(p.Status.Message, wantMsg) {
+			t.Errorf("message = %q, want it to contain %q", p.Status.Message, wantMsg)
+		}
+		got := getHomePVC(t, c)
+		if got.Spec.Resources.Requests.Storage().String() != "10Gi" {
+			t.Errorf("pvc size = %s, want unchanged 10Gi", got.Spec.Resources.Requests.Storage())
+		}
+		if _, ok := got.Annotations[homeExpandAnnotationKey]; ok {
+			t.Error("expand stamp set on a failed grow, want none")
+		}
+	}
+	t.Run("allowVolumeExpansion false", func(t *testing.T) {
+		run(t, storageClassObj(false), "storage class mayastor-2 does not allow volume expansion")
+	})
+	t.Run("storage class missing", func(t *testing.T) {
+		run(t, nil, "cannot read storage class mayastor-2")
+	})
+}
+
+// A grow whose capacity does not catch up within five minutes of the
+// stamp fails the pen and names the likely cause: the storage class must
+// allow volume expansion.
+func TestHomeGrowStallFails(t *testing.T) {
+	pen := newPen()
+	pen.Spec.HomeSize = "20Gi"
+	pvc := homePVC("20Gi", "10Gi", "mayastor-2")
+	pvc.Annotations = map[string]string{homeExpandAnnotationKey: "2026-11-24T08:00:00Z"}
+	c := newClient(t, homeGrowObjects(t, pen, pvc, storageClassObj(true))...)
+	// six minutes after the stamp: past the five-minute stall timeout
+	reconcileOnceAt(t, c, devNS, testConfig(), time.Date(2026, 11, 24, 8, 6, 0, 0, time.UTC))
+	p := getPen(t, c)
+	if p.Status.Phase != v1alpha1.PhaseFailed {
+		t.Errorf("phase = %q, want Failed after a stalled grow", p.Status.Phase)
+	}
+	if !strings.Contains(p.Status.Message, "home expansion stalled") {
+		t.Errorf("message = %q, want 'home expansion stalled'", p.Status.Message)
+	}
+	if !strings.Contains(p.Status.Message, "mayastor-2") {
+		t.Errorf("message = %q, want the storage class named", p.Status.Message)
+	}
+}
+
+// A stalled grow on a claim without a StorageClassName names the cluster
+// default instead.
+func TestHomeGrowStallFailsWithDefaultStorageClass(t *testing.T) {
+	pen := newPen()
+	pen.Spec.HomeSize = "20Gi"
+	pvc := homePVC("20Gi", "10Gi", "")
+	pvc.Annotations = map[string]string{homeExpandAnnotationKey: "2026-11-24T08:00:00Z"}
+	c := newClient(t, homeGrowObjects(t, pen, pvc)...)
+	reconcileOnceAt(t, c, devNS, testConfig(), time.Date(2026, 11, 24, 8, 6, 0, 0, time.UTC))
+	p := getPen(t, c)
+	if p.Status.Phase != v1alpha1.PhaseFailed {
+		t.Errorf("phase = %q, want Failed after a stalled grow", p.Status.Phase)
+	}
+	if !strings.Contains(p.Status.Message, "home expansion stalled") {
+		t.Errorf("message = %q, want 'home expansion stalled'", p.Status.Message)
+	}
+	if !strings.Contains(p.Status.Message, "default storage class") {
+		t.Errorf("message = %q, want the default storage class named", p.Status.Message)
+	}
+}
+
+// A fresh stamp within the timeout leaves the claim untouched and keeps
+// the grow message (no patch on every pass).
+func TestHomeGrowInFlightWaitsWithoutPatch(t *testing.T) {
+	pen := newPen()
+	pen.Spec.HomeSize = "20Gi"
+	pvc := homePVC("20Gi", "10Gi", "mayastor-2")
+	pvc.Annotations = map[string]string{homeExpandAnnotationKey: "2026-11-24T08:00:00Z"}
+	c := newClient(t, homeGrowObjects(t, pen, pvc, storageClassObj(true))...)
+	before := getHomePVC(t, c)
+	reconcileOnceAt(t, c, devNS, testConfig(), time.Date(2026, 11, 24, 8, 2, 0, 0, time.UTC))
+	got := getHomePVC(t, c)
+	if got.ResourceVersion != before.ResourceVersion {
+		t.Errorf("pvc updated during the grow: resourceVersion %q, want %q", got.ResourceVersion, before.ResourceVersion)
+	}
+	p := getPen(t, c)
+	if p.Status.Phase != v1alpha1.PhaseReady || !p.Status.Ready {
+		t.Errorf("phase = %q ready = %v, want Ready/true while the grow is in flight", p.Status.Phase, p.Status.Ready)
+	}
+	if p.Status.Message != "growing home to 20Gi" {
+		t.Errorf("message = %q, want %q", p.Status.Message, "growing home to 20Gi")
+	}
+}
+
+// The capacity reaching the desired size removes the stamp and returns
+// the pen to the plain ready message.
+func TestHomeGrowCompleteClearsAnnotation(t *testing.T) {
+	pen := newPen()
+	pen.Spec.HomeSize = "20Gi"
+	pvc := homePVC("20Gi", "20Gi", "mayastor-2")
+	pvc.Annotations = map[string]string{homeExpandAnnotationKey: "2026-11-24T08:00:00Z"}
+	c := newClient(t, homeGrowObjects(t, pen, pvc, storageClassObj(true))...)
+	reconcileOnceAt(t, c, devNS, testConfig(), time.Date(2026, 11, 24, 8, 1, 0, 0, time.UTC))
+	got := getHomePVC(t, c)
+	if _, ok := got.Annotations[homeExpandAnnotationKey]; ok {
+		t.Error("expand stamp still set after the grow completed")
+	}
+	if got.Spec.Resources.Requests.Storage().String() != "20Gi" {
+		t.Errorf("pvc size = %s, want 20Gi", got.Spec.Resources.Requests.Storage())
+	}
+	p := getPen(t, c)
+	if p.Status.Phase != v1alpha1.PhaseReady || !p.Status.Ready {
+		t.Errorf("phase = %q ready = %v, want Ready/true", p.Status.Phase, p.Status.Ready)
+	}
+	if p.Status.Message != "ready" {
+		t.Errorf("message = %q, want 'ready' (grow finished)", p.Status.Message)
+	}
+}
+
+// An unchanged size does not touch the claim: no patch, no annotation.
+func TestHomeUnchangedSizeIsNoOp(t *testing.T) {
+	pen := newPen()
+	pen.Spec.HomeSize = "10Gi"
+	pvc := homePVC("10Gi", "10Gi", "mayastor-2")
+	c := newClient(t, homeGrowObjects(t, pen, pvc, storageClassObj(true))...)
+	before := getHomePVC(t, c)
+	reconcileOnce(t, c)
+	got := getHomePVC(t, c)
+	if got.ResourceVersion != before.ResourceVersion {
+		t.Errorf("pvc updated on unchanged size: resourceVersion %q, want %q", got.ResourceVersion, before.ResourceVersion)
+	}
+	if _, ok := got.Annotations[homeExpandAnnotationKey]; ok {
+		t.Error("expand stamp set on unchanged size, want none")
+	}
+}
+
+// A claim whose spec reached the desired size but whose capacity is
+// still empty is not done: it is still in flight. A fresh stamp waits
+// (the stamp is kept, no re-stamp), and a stamp past the five-minute
+// timeout fails. Without the wait, a grow that never provisions loses
+// the stamp and the stall safety net with it.
+func TestHomeGrowZeroCapacityWaitsAndStalls(t *testing.T) {
+	t.Run("fresh stamp keeps waiting", func(t *testing.T) {
+		pen := newPen()
+		pen.Spec.HomeSize = "20Gi"
+		pvc := homePVC("20Gi", "", "mayastor-2") // capacity empty: not provisioned yet
+		pvc.Annotations = map[string]string{homeExpandAnnotationKey: "2026-11-24T08:00:00Z"}
+		c := newClient(t, homeGrowObjects(t, pen, pvc, storageClassObj(true))...)
+		before := getHomePVC(t, c)
+		reconcileOnceAt(t, c, devNS, testConfig(), time.Date(2026, 11, 24, 8, 2, 0, 0, time.UTC))
+		got := getHomePVC(t, c)
+		if got.ResourceVersion != before.ResourceVersion {
+			t.Errorf("pvc updated while waiting: resourceVersion %q, want %q", got.ResourceVersion, before.ResourceVersion)
+		}
+		if got.Annotations[homeExpandAnnotationKey] != "2026-11-24T08:00:00Z" {
+			t.Errorf("expand stamp = %q, want kept 2026-11-24T08:00:00Z", got.Annotations[homeExpandAnnotationKey])
+		}
+		p := getPen(t, c)
+		if p.Status.Phase != v1alpha1.PhaseReady || !p.Status.Ready {
+			t.Errorf("phase = %q ready = %v, want Ready/true while the grow is in flight", p.Status.Phase, p.Status.Ready)
+		}
+		if p.Status.Message != "growing home to 20Gi" {
+			t.Errorf("message = %q, want %q", p.Status.Message, "growing home to 20Gi")
+		}
+	})
+	t.Run("stale stamp fails", func(t *testing.T) {
+		pen := newPen()
+		pen.Spec.HomeSize = "20Gi"
+		pvc := homePVC("20Gi", "", "mayastor-2") // capacity empty: the grow never bound
+		pvc.Annotations = map[string]string{homeExpandAnnotationKey: "2026-11-24T08:00:00Z"}
+		c := newClient(t, homeGrowObjects(t, pen, pvc, storageClassObj(true))...)
+		// six minutes after the stamp: past the five-minute stall timeout
+		reconcileOnceAt(t, c, devNS, testConfig(), time.Date(2026, 11, 24, 8, 6, 0, 0, time.UTC))
+		p := getPen(t, c)
+		if p.Status.Phase != v1alpha1.PhaseFailed {
+			t.Errorf("phase = %q, want Failed after a stalled grow", p.Status.Phase)
+		}
+		if !strings.Contains(p.Status.Message, "home expansion stalled") {
+			t.Errorf("message = %q, want 'home expansion stalled'", p.Status.Message)
+		}
+		if !strings.Contains(p.Status.Message, "mayastor-2") {
+			t.Errorf("message = %q, want the storage class named", p.Status.Message)
+		}
+	})
+}
+
+// A claim without a StorageClassName binds to the cluster default, which
+// the operator cannot read (get only, no list). The grow proceeds and the
+// stall timeout stays the safety net.
+func TestHomeGrowWithoutStorageClassSkipsCheck(t *testing.T) {
+	pen := newPen()
+	pen.Spec.HomeSize = "20Gi"
+	pvc := homePVC("10Gi", "10Gi", "") // no StorageClass object registered: a read would fail
+	c := newClient(t, homeGrowObjects(t, pen, pvc)...)
+	reconcileOnce(t, c)
+	p := getPen(t, c)
+	if p.Status.Phase != v1alpha1.PhaseReady || !p.Status.Ready {
+		t.Errorf("phase = %q ready = %v, want Ready/true (no storage class read for the default)", p.Status.Phase, p.Status.Ready)
+	}
+	got := getHomePVC(t, c)
+	if got.Spec.Resources.Requests.Storage().String() != "20Gi" {
+		t.Errorf("pvc size = %s, want 20Gi", got.Spec.Resources.Requests.Storage())
+	}
+	if got.Annotations[homeExpandAnnotationKey] == "" {
+		t.Error("expand stamp not set")
+	}
+}
+
+// A claim that is not provisioned yet (no capacity) compares against the
+// spec request, so a resize before provisioning still grows.
+func TestHomeGrowUsesSpecSizeWhenCapacityEmpty(t *testing.T) {
+	pen := newPen()
+	pen.Spec.HomeSize = "20Gi"
+	pvc := homePVC("10Gi", "", "mayastor-2")
+	c := newClient(t, homeGrowObjects(t, pen, pvc, storageClassObj(true))...)
+	reconcileOnce(t, c)
+	got := getHomePVC(t, c)
+	if got.Spec.Resources.Requests.Storage().String() != "20Gi" {
+		t.Errorf("pvc size = %s, want 20Gi", got.Spec.Resources.Requests.Storage())
+	}
+	if got.Annotations[homeExpandAnnotationKey] == "" {
+		t.Error("expand stamp not set")
+	}
+}
