@@ -3,13 +3,12 @@
 pipen runs isolated development environments on a Kubernetes cluster. Each
 environment is a pen: one machine per project, up with one command.
 
-Run `pipen up <name>`, then run `ssh <you>@<hostname>`. Each pen is a kata pod
-on a Mayastor storage node. kata is a virtual machine runtime. The pen runs an
-Ubuntu 26.04 guest. The guest has the full development toolchain, docker, and
-pi.dev. pi.dev runs in shared mode against the litellm proxy in the cluster,
-or in self-provider mode against your own model-provider account with no
-proxy. litellm is a model routing proxy. Your home
-directory stays across pod restarts. You reach the pen by name on the
+Run `pipen up <name>`, then run `ssh <you>@<hostname>`. Each pen is a pod
+on the cluster. The pen runs an Ubuntu 26.04 guest. The guest has the full
+development toolchain, docker, and pi.dev. pi.dev runs in shared mode against
+the litellm proxy in the cluster, or in self-provider mode against your own
+model-provider account with no proxy. litellm is a model routing proxy. Your
+home directory stays across pod restarts. You reach the pen by name on the
 tailnet. The tailnet is the Tailscale private network.
 
 This repo holds the general toolchain. Your cluster's private deployment repo
@@ -19,8 +18,8 @@ tailnet domain.
 - `devenv/` holds the pen definition: the dev image (Dockerfile, entrypoint,
   docker daemon configuration)
 - `operator/` holds the cluster-wide Go operator: the Pen CRD types, the
-  reconciler, and its image. It watches Pens and brings each pen's PVC, kata
-  pod and tailnet Service up
+  reconciler, and its image. It watches Pens and brings each pen's PVC, pod
+  and tailnet Service up
 - `charts/pipen-operator/` installs the operator once per cluster (CRD,
   Deployment, RBAC, operator config)
 - `charts/dev-namespace/` is a mini Helm chart. It provisions one developer
@@ -32,20 +31,19 @@ tailnet domain.
 
 ## What a pen gives you
 
-- A kata pod with 4 CPU and 8 GiB memory. It runs on the Mayastor storage
-  nodes (label `openebs.io/engine=mayastor`). Only those nodes can attach the
+- A pod with 4 CPU and 8 GiB memory. It runs on nodes that can attach the
   home volume
 - Ubuntu 26.04 with the standard dev toolchain: `git curl build-essential htop
 docker.io direnv npm unzip`, uv, fnm, Node 24, and
   `@earendil-works/pi-coding-agent` (`pi`)
-- docker inside the pen (dockerd in a privileged kata guest)
+- docker inside the pen (dockerd in a privileged guest)
 - pi.dev against the cluster-internal litellm proxy
   (`http://litellm.litellm.svc.cluster.local:4000`) in shared mode. The
   guest needs no tailnet DNS. Your per-developer key lives in
   `~/.litellm_key`. In self-provider mode the pen carries the provider
   configuration for your own account and no proxy is involved
-- A persistent `/home` on a mirrored `mayastor-2` PVC (10 GiB by default). It
-  survives pod deletion. It re-attaches on either storage node
+- A persistent `/home` on a PVC (10 GiB by default). It
+  survives pod deletion. It re-attaches on a node that can access the volume
 - ssh to the pen over the tailnet. The Tailscale operator gives each pen a
   MagicDNS hostname. The operator can add a suffix, for example
   `<dev>-<name>-1`. The CLI always prints the hostname that the operator
@@ -102,10 +100,10 @@ An admin bootstraps you once (see Admins) and gives you the
 
 ### What stays, and what does not
 
-- `/home/<you>` lives on the mirrored PVC. It survives `pipen down` + `up`, pod
+- `/home/<you>` lives on the persistent PVC. It survives `pipen down` + `up`, pod
   deletion, and node moves. The `WaitForFirstConsumer` volume re-attaches on
-  the storage node where the new pod lands
-- Everything else lives on the temporary kata rootfs. In particular, docker
+  a node that can attach the volume
+- Everything else lives on the temporary rootfs. In particular, docker
   images and containers that you build inside a pen vanish on every pod
   recreation. The data root for dockerd is `/var/lib/docker`, on the rootfs.
   Re-running `up` restores your home, not your docker state
@@ -132,7 +130,7 @@ presents a new one with one more prompt.
 `pi update` works inside a pen. The image bakes pi into its own npm prefix
 (`/opt/pi`). That prefix is writable by your user, so the in-place
 `npm install` for the self-update works. The update lives on the temporary
-kata rootfs. A pod recreation resets pi to the image-baked version. To change
+rootfs. A pod recreation resets pi to the image-baked version. To change
 the baked pi version for everyone, edit `devenv/Dockerfile`. The nightly build picks the change up. To run an older build, pin it with
 `pipen up --image ghcr.io/caktus/pipen:<tag>`.
 
@@ -203,16 +201,10 @@ Hard requirements (pipen does not run without them):
 Default-install requirements (any alternative works when you set the
 matching value):
 
-- **Storage for pen homes** — the defaults assume OpenEBS Mayastor (chart
-  `openebs/openebs` from https://openebs.github.io/openebs, storage class
-  `mayastor-2`). Any StorageClass works: set `config.storageClass` and
-  `config.nodeSelector`. If the kata guest talks to the Mayastor home-PVC
-  gateway through the pod network, default-deny egress blocks it. Allow the
-  gateway with `egress.podAllows` or `egress.cidrAllows` (dev-namespace
-  chart)
-- **Kata containers runtime** on the nodes, for the default
-  `config.runtimeClass: kata`. Set the value to empty to run without a
-  runtime class
+- **Storage for pen homes** — Any StorageClass works: set `config.storageClass` and
+  `config.nodeSelector`. When the home-volume data path uses the pod network,
+  allow its endpoint with `egress.podAllows` or `egress.cidrAllows` (dev-namespace chart).
+- **Runtime class for pods** — Set `config.runtimeClass` to use a runtime class.
 
 Optional:
 
@@ -223,6 +215,12 @@ Optional:
   shows the rule; the same rule pattern serves any in-cluster model
   endpoint)
 
+Reference configuration (the defaults from earlier versions):
+
+- For Mayastor storage nodes, set `config.nodeSelector` to `{openebs.io/engine: mayastor}`
+- For Mayastor storage, set `config.storageClass` to `"mayastor-2"`
+- For kata runtime, set `config.runtimeClass` to `"kata"`
+
 The chart defaults assume this repo's reference cluster. An external org
 sets these values and nothing else:
 
@@ -230,9 +228,9 @@ sets these values and nothing else:
 | ---------------------------------------------- | -------------- | -------------------------------------- | ------------------------------------------------------ |
 | `image`                                        | pipen-operator | `ghcr.io/caktus/pipen-operator:latest` | the operator image                                     |
 | `config.image`                                 | pipen-operator | `ghcr.io/caktus/pipen:latest`          | the pen pod image                                      |
-| `config.storageClass`                          | pipen-operator | `mayastor-2`                           | the home PVC class                                     |
-| `config.nodeSelector`                          | pipen-operator | `openebs.io/engine: mayastor`          | the home volume nodes                                  |
-| `config.runtimeClass`                          | pipen-operator | `kata`                                 | empty runs no runtime class                            |
+| `config.storageClass`                          | pipen-operator | `""`                                   | the home PVC class                                     |
+| `config.nodeSelector`                          | pipen-operator | `{}`                                   | the home volume nodes                                  |
+| `config.runtimeClass`                          | pipen-operator | `""`                                   | empty runs no runtime class                            |
 | `config.loadBalancerClass`                     | pipen-operator | `tailscale`                            | pen Service exposure                                   |
 | `config.serviceAnnotations`                    | pipen-operator | `tailscale.com/expose: "true"`         | pen Service annotations                                |
 | `config.tailnetDomain`                         | pipen-operator | empty                                  | informational, printed hostnames                       |
@@ -428,14 +426,15 @@ token: <sa-token>
 ### Wipe the home data for one pen
 
 ```sh
-kubectl -n env-<dev> delete pvc <pen>-home     # frees the mirrored volume
+kubectl -n env-<dev> delete pvc <pen>-home     # frees the home volume
 ```
 
 ## Capacity
 
-Your storage sets the ceiling for pen count. At 10 GiB mirrored per pen, a
-`mayastor-2`-class tier with ~2 TiB usable holds about 70+ pens. Make sure
-that the DiskPool has free capacity before you provision at scale.
+Your storage sets the ceiling for pen count. At 10 GiB per pen, storage with
+~2 TiB usable holds about 70+ pens. Make sure that the storage has free
+capacity before you provision at scale. This example assumes mirrored storage;
+the actual capacity depends on your StorageClass.
 
 ## CLI notes
 

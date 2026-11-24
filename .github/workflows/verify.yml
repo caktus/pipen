@@ -302,21 +302,20 @@ jobs:
         run: kind load docker-image pipen-operator:e2e --name e2e
       - name: Install both charts with kind-shaped values
         run: |
-          # kind shape: the long-running pause image, the kind default
-          # storage class, a small pod, no runtime class (kind runs no
-          # kata). nodeSelector and serviceAnnotations cannot be cleared
-          # with --set or a values file (helm deep-merges maps), so the
-          # config is patched to the kind shape after the install.
+          # kind shape: the long-running pause image, a small pod.
+          # serviceAnnotations cannot be cleared with --set or a values file
+          # (helm deep-merges maps), so that config is patched to the kind
+          # shape after the install. The other chart defaults now match the
+          # plain kind cluster (StorageClass standard, no runtime class,
+          # no node selector).
           helm install operator charts/pipen-operator \
             --set image=pipen-operator:e2e \
             --set config.image=registry.k8s.io/pause:3.10 \
             --set config.homeSize=1Gi \
             --set config.cpu=100m \
-            --set config.memory=128Mi \
-            --set config.storageClass=standard \
-            --set config.runtimeClass=
+            --set config.memory=128Mi
           kubectl -n pipen patch configmap pipen-operator-config \
-            --type merge -p '{"data":{"nodeSelector":"{}","serviceAnnotations":"{}"}}'
+            --type merge -p '{"data":{"serviceAnnotations":"{}"}}'
           helm install ci-dev charts/dev-namespace \
             --set dev=ci \
             --set 'authorizedKeys[0]=ssh-ed25519 AAAACIKEY e2e'

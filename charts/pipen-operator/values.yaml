@@ -21,11 +21,12 @@ config:
   cpu: "4"
   # Pod memory request/limit.
   memory: "8Gi"
-  # Node selector: the only nodes that can attach the home volume.
-  nodeSelector:
-    openebs.io/engine: mayastor
-  # Home PVC storage class.
-  storageClass: "mayastor-2"
+  # Node selector: the only nodes that can attach the home volume. Empty
+  # (default): pens can attach the home PVC to any node.
+  nodeSelector: {}
+  # Home PVC storage class. Empty (default): the cluster's default
+  # StorageClass applies.
+  storageClass: ""
   # Annotations on every pen Service (tailscale L4 exposure). The
   # tailscale.com/hostname annotation is set per pen by the operator.
   serviceAnnotations:
@@ -36,6 +37,5 @@ config:
   imagePullPolicy: "IfNotPresent"
   # loadBalancerClass for pen Services (the Tailscale operator).
   loadBalancerClass: "tailscale"
-  # Runtime class for env pods (kata). Empty (no runtime class) for
-  # clusters that run no kata runtime, e.g. the kind e2e job.
-  runtimeClass: "kata"
+  # Runtime class for env pods. Empty (default): no runtime class.
+  runtimeClass: ""

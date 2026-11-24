@@ -51,7 +51,7 @@ func testConfig() config.Config {
 		TailnetDomain:     "ts.example.net",
 		ImagePullPolicy:   "IfNotPresent",
 		LoadBalancerClass: "tailscale",
-		RuntimeClass:      "kata",
+		RuntimeClass:      "",
 	}
 }
 
@@ -265,8 +265,8 @@ func TestReconcileCreatesObjects(t *testing.T) {
 	if err := c.Get(ctx, types.NamespacedName{Name: "env-" + penName, Namespace: devNS}, pod); err != nil {
 		t.Fatalf("pod not created: %v", err)
 	}
-	if pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName != "kata" {
-		t.Errorf("pod runtimeClass = %v, want kata", pod.Spec.RuntimeClassName)
+	if pod.Spec.RuntimeClassName != nil {
+		t.Errorf("pod runtimeClass = %v, want nil for empty runtime class", pod.Spec.RuntimeClassName)
 	}
 	sec := pod.Spec.Containers[0].SecurityContext
 	if sec == nil || sec.Privileged == nil || !*sec.Privileged {
@@ -590,3 +590,20 @@ func TestReconcileSpecDefaultsAndOverride(t *testing.T) {
 }
 
 // helper to avoid importing interceptor at file top in case of version drift
+
+func TestReconcileEmptyStorageClass(t *testing.T) {
+	cfg := testConfig()
+	cfg.StorageClass = ""
+	objs := append([]client.Object{ownedNS(t, devNS), newPen()}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, cfg)
+	ctx := context.Background()
+
+	pvc := &corev1.PersistentVolumeClaim{}
+	if err := c.Get(ctx, types.NamespacedName{Name: penName + "-home", Namespace: devNS}, pvc); err != nil {
+		t.Fatalf("pvc not created: %v", err)
+	}
+	if pvc.Spec.StorageClassName != nil {
+		t.Errorf("pvc storageClass = %v, want nil for empty storage class", pvc.Spec.StorageClassName)
+	}
+}

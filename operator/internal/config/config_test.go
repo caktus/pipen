@@ -54,8 +54,8 @@ func TestFromDataMinimal(t *testing.T) {
 	if cfg.LoadBalancerClass != "tailscale" {
 		t.Errorf("loadBalancerClass = %q, want tailscale", cfg.LoadBalancerClass)
 	}
-	if cfg.RuntimeClass != "kata" {
-		t.Errorf("runtimeClass = %q, want kata", cfg.RuntimeClass)
+	if cfg.RuntimeClass != "" {
+		t.Errorf("runtimeClass = %q, want empty", cfg.RuntimeClass)
 	}
 }
 

@@ -35,13 +35,25 @@ Or from a repo checkout: `helm install operator charts/pipen-operator ...`.
 | `config.homeSize`           | string | Home PVC size.                                                                                                                    |
 | `config.cpu`                | string | Pod CPU request/limit.                                                                                                            |
 | `config.memory`             | string | Pod memory request/limit.                                                                                                         |
-| `config.nodeSelector`       | object | The only nodes that can attach the home volume.                                                                                   |
-| `config.storageClass`       | string | Home PVC storage class.                                                                                                           |
+| `config.nodeSelector`       | object | Node selector for home volume attachment. Empty (default): pens can attach the home PVC to any node.                              |
+| `config.storageClass`       | string | Home PVC storage class. Empty (default): the cluster's default StorageClass applies.                                              |
 | `config.serviceAnnotations` | object | Annotations on every pen Service (tailscale L4 exposure). The `tailscale.com/hostname` annotation is set per pen by the operator. |
 | `config.tailnetDomain`      | string | Informational tailnet domain (`TAILNET_HOSTNAME` env, logged hostnames).                                                          |
 | `config.imagePullPolicy`    | string | Pod image pull policy.                                                                                                            |
 | `config.loadBalancerClass`  | string | `loadBalancerClass` for pen Services (the Tailscale operator).                                                                    |
-| `config.runtimeClass`       | string | Runtime class for env pods (`kata`). Empty means no runtime class, for clusters that run no kata runtime.                         |
+| `config.runtimeClass`       | string | Runtime class for env pods. Empty (default): no runtime class.                                                                    |
+
+## Upgrade
+
+### Version 0.4.0
+
+Neutral defaults: `config.nodeSelector` to `{}`, `config.storageClass` to `""`, and `config.runtimeClass` to `""`.
+
+An existing cluster must set explicit values or its pens change behavior:
+
+- `config.nodeSelector: {openebs.io/engine: mayastor}` for Mayastor nodes
+- `config.storageClass: "mayastor-2"` for Mayastor storage
+- `config.runtimeClass: "kata"` for kata runtime
 
 ## Rollout
 

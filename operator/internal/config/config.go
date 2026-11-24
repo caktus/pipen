@@ -33,8 +33,7 @@ type Config struct {
 	ImagePullPolicy string
 	// LoadBalancerClass is set on each pen Service (tailscale).
 	LoadBalancerClass string
-	// RuntimeClass is the pod runtime class (kata). Empty means no runtime
-	// class at all (clusters that run no kata runtime, e.g. kind e2e).
+	// RuntimeClass is the pod runtime class. Empty means no runtime class.
 	RuntimeClass string
 }
 
@@ -48,7 +47,7 @@ func FromData(data map[string]string) (Config, error) {
 		ServiceAnnotations: map[string]string{},
 		ImagePullPolicy:    "IfNotPresent",
 		LoadBalancerClass:  "tailscale",
-		RuntimeClass:       "kata",
+		RuntimeClass:       "",
 	}
 	for k, v := range data {
 		switch k {
