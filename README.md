@@ -3,12 +3,15 @@
 pipen runs isolated development environments on a Kubernetes cluster. Each
 environment is a pen: one machine per project, up with one command.
 
-Run `pipen up <name>`, then run `ssh <you>@<hostname>`. Each pen is a pod
-on the cluster. The pen runs an Ubuntu 26.04 guest. The guest has the full
-development toolchain, docker, and pi.dev. pi.dev runs in shared mode against
-the litellm proxy in the cluster, or in self-provider mode against your own
-model-provider account with no proxy. litellm is a model routing proxy. Your
-home directory stays across pod restarts. You reach the pen by name on the
+Run `pipen up <name>`, then run `ssh <you>@<hostname>`. The operator runs
+each pen on a Sandbox. A Sandbox is an object from the agent-sandbox
+project. It owns the pen pod and its lifecycle. The pen's Sandbox is named
+`env-<pen>`, and its pod carries the same name. `pipen logs` reads that
+pod, which is why it works. The pen runs an Ubuntu 26.04 guest. The guest
+has the full development toolchain, docker, and pi.dev. pi.dev runs in
+shared mode against the litellm proxy in the cluster, or in self-provider
+mode against your own model-provider account with no proxy. litellm is a
+model routing proxy. Your home directory stays across pod restarts. You reach the pen by name on the
 tailnet. The tailnet is the Tailscale private network.
 
 This repo holds the general toolchain. Your cluster's private deployment repo
@@ -18,10 +21,10 @@ tailnet domain.
 - `devenv/` holds the pen definition: the dev image (Dockerfile, entrypoint,
   docker daemon configuration)
 - `operator/` holds the cluster-wide Go operator: the Pen CRD types, the
-  reconciler, and its image. It watches Pens and brings each pen's PVC, pod
-  and tailnet Service up
+  reconciler, and its image. It watches Pens and brings each pen's PVC,
+  Sandbox and tailnet Service up
 - `charts/pipen-operator/` installs the operator once per cluster (CRD,
-  Deployment, RBAC, operator config)
+  Deployment, RBAC, operator config) and the pinned agent-sandbox controller
 - `charts/dev-namespace/` is a mini Helm chart. It provisions one developer
   namespace: Namespace, ServiceAccount, namespace-scoped Role/RoleBinding, a
   ServiceAccount token, and the ssh-key Secret. It also grants the operator
@@ -48,6 +51,17 @@ docker.io direnv npm unzip`, uv, fnm, Node 24, and
   MagicDNS hostname. The operator can add a suffix, for example
   `<dev>-<name>-1`. The CLI always prints the hostname that the operator
   assigned
+- Pause. `pipen pause <name>` stops the pen pod and keeps the Pen, the home
+  PVC, and the tailnet hostname. `pipen resume <name>` starts the pod again
+  with a fresh TTL
+- Idle shutdown. A TTL (a time limit, for example `8h`) shuts the pen down
+  when the window ends. Set one per pen with `pipen up --ttl 8h`, or set
+  the operator default (`operatorConfig.defaultTTL`). `pipen ls` shows the
+  remaining time
+- Egress hardening. `pipen up --egress` adds a NetworkPolicy for the pen.
+  A NetworkPolicy filters a pod's network traffic. The policy allows only
+  the hosts in the operator value `operatorConfig.egressHosts` and cluster
+  DNS
 - Environment names carry your developer or namespace as a prefix. The CLI
   adds the prefix when it is missing. Hostnames do not collide across
   developers
@@ -80,10 +94,14 @@ An admin bootstraps you once (see Admins) and gives you the
 
    ```sh
    pipen up myenv          # creates one Pen; the operator brings the env up
+   pipen up myenv --ttl 8h # the pen shuts itself down after 8h
+   pipen up myenv --egress # allow only the approved egress destinations
    pipen ssh myenv         # or: ssh <you>@<hostname> (hostname printed by up)
-   pipen ls                # pens: phase, node, hostname
+   pipen pause myenv       # stop the pod; the Pen, PVC and hostname stay
+   pipen resume myenv      # start a paused pen again; the TTL starts fresh
+   pipen ls                # pens: phase, TTL, node, hostname
    pipen logs myenv        # pod logs (entrypoint + sshd)
-   pipen down myenv        # deletes the Pen; the operator removes pod + Service, the PVC survives
+   pipen down myenv        # deletes the Pen; the Sandbox, pod and Service go, the PVC survives
    ```
 
    The pen starts on the operator's default image (see Admins). To pin
@@ -100,6 +118,8 @@ An admin bootstraps you once (see Admins) and gives you the
 
 ### What stays, and what does not
 
+- `pipen down <name>` removes the Pen, the Sandbox, the pod, and the tailnet
+  Service. The home PVC and its data stay
 - `/home/<you>` lives on the persistent PVC. It survives `pipen down` + `up`, pod
   deletion, and node moves. The `WaitForFirstConsumer` volume re-attaches on
   a node that can attach the volume
@@ -291,12 +311,15 @@ This creates, in namespace `pipen`:
   `helm upgrade` keeps it in sync. While v1alpha1 is frozen the rendered
   manifest never changes, so upgrades are no-ops. Do not remove the CRD
   from the chart: Helm would delete it
+- The agent-sandbox controller in the `agent-sandbox-system` namespace. The
+  chart vendors the pinned v1.0.12 release asset. It creates the pen pod
+  from each Sandbox. The chart README documents the upgrade path
 - ServiceAccount + Deployment (one replica; leader election is on)
 - A cluster-scoped READ-ONLY ClusterRole/RoleBinding on Pens only, and the
   leader-election Role in `pipen`
 - The ConfigMap `pipen-operator-config` with the cluster shape: default
   image, home size, cpu/memory, node selector, storage class, tailscale
-  Service annotations, tailnet domain. Change it (or the chart values) and
+  Service annotations, tailnet domain, default TTL, egress hosts. Change it (or the chart values) and
   the operator picks it up. Existing pens keep their specs; the change
   applies to pens created afterwards
 
@@ -359,10 +382,11 @@ This creates, in namespace `<namespacePrefix><dev>` (default `env-<dev>`; the la
 - ServiceAccount `deploy` and a namespace-scoped Role/RoleBinding. The role
   covers the pens CRD (`pens`, `pens/status`), `get` on `pods`, and `get`
   on `pods/log`. Nothing else. In particular it holds **no** pod, Service
-  or pvc create. The operator's own ServiceAccount does those, via the
-  separate `pipen-operator` Role the same chart creates (pods, services,
-  pvc create, configmap/secret read, and still **no pvc delete**). The
-  admin-only data wipe stays with the admin. Nothing is cluster-wide, and
+  or pvc create. The operator's own ServiceAccount brings the pen up, via
+  the separate `pipen-operator` Role the same chart creates (sandboxes,
+  networkpolicies, services, pvc create, pod reads, configmap/secret read,
+  and still **no pvc delete**). The agent-sandbox controller creates the
+  pod. The admin-only data wipe stays with the admin. Nothing is cluster-wide, and
   nothing reaches other namespaces
 - The explicit ServiceAccount token Secret `deploy-token`
 - The Secret `herdr-dev-<namespace>` (the ssh keys. Under the default prefix that is `herdr-dev-env-<dev>`)
