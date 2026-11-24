@@ -743,6 +743,53 @@ jobs:
             sleep 2
           done
           [ "$phase" = "Ready" ] || { echo "pen phase = $phase, want Ready" >&2; exit 1; }
+      - name: The credentials annotation mounts the secret
+        run: |
+          # The secret create and the patch run as the dev token, so they
+          # prove the dev Role grants secret writes and pen updates in the
+          # pen namespace. The annotation change restarts the pod through
+          # the convergence cycle, so the wait below looks for a pod with
+          # a new uid
+          uid=$(kubectl -n env-ci get pod env-ci-smoke -o jsonpath='{.metadata.uid}')
+          [ -n "$uid" ] || { echo "pod env-ci-smoke not found" >&2; exit 1; }
+          kubectl --kubeconfig "$DEV_KUBECONFIG" -n env-ci create secret generic \
+            pen-creds --from-literal=token=ci-credential
+          kubectl --kubeconfig "$DEV_KUBECONFIG" -n env-ci patch pen ci-smoke \
+            --type merge -p '{"metadata":{"annotations":{"pens.pipen.dev/credentials":"pen-creds"}}}'
+          new_uid=""
+          for i in $(seq 1 30); do
+            new_uid=$(kubectl -n env-ci get pod env-ci-smoke \
+              -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+            if [ -n "$new_uid" ] && [ "$new_uid" != "$uid" ] \
+              && kubectl -n env-ci get pod env-ci-smoke \
+                -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' \
+                | grep -q True; then
+              break
+            fi
+            sleep 10
+          done
+          [ -n "$new_uid" ] && [ "$new_uid" != "$uid" ] \
+            || { echo "pod not recreated (uid = ${new_uid:-absent}, before = $uid)" >&2; exit 1; }
+          kubectl -n env-ci wait --for=condition=Ready pod/env-ci-smoke --timeout=180s
+          vol_secret=$(kubectl -n env-ci get pod env-ci-smoke \
+            -o jsonpath='{.spec.volumes[?(@.name=="dev-credentials")].secret.secretName}')
+          [ "$vol_secret" = "pen-creds" ] \
+            || { echo "dev-credentials volume secretName = ${vol_secret:-absent}, want pen-creds" >&2; exit 1; }
+          mount_path=$(kubectl -n env-ci get pod env-ci-smoke \
+            -o jsonpath='{.spec.containers[0].volumeMounts[?(@.name=="dev-credentials")].mountPath}')
+          [ "$mount_path" = "/run/herdr/credentials" ] \
+            || { echo "dev-credentials mount path = ${mount_path:-absent}, want /run/herdr/credentials" >&2; exit 1; }
+          read_only=$(kubectl -n env-ci get pod env-ci-smoke \
+            -o jsonpath='{.spec.containers[0].volumeMounts[?(@.name=="dev-credentials")].readOnly}')
+          [ "$read_only" = "true" ] \
+            || { echo "dev-credentials mount readOnly = ${read_only:-absent}, want true" >&2; exit 1; }
+          phase=""
+          for i in $(seq 1 30); do
+            phase=$(kubectl -n env-ci get pen ci-smoke -o jsonpath='{.status.phase}')
+            [ "$phase" = "Ready" ] && break
+            sleep 2
+          done
+          [ "$phase" = "Ready" ] || { echo "pen phase = $phase, want Ready" >&2; exit 1; }
       - name: The marker file survived the resize
         run: |
           # The pause image has no shell, so the check runs in a
