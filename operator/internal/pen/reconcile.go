@@ -1,7 +1,8 @@
 // Package pen reconciles Pen objects. For each Pen it ensures the home
 // PVC, the Sandbox and the tailnet-exposed Service, and reports the
 // result on Pen status. Reconcile converges the Sandbox (operatingMode,
-// shutdownTime, service) and the egress NetworkPolicy. The PVC is never
+// shutdownTime, service, env container resources), the egress
+// NetworkPolicy, and the home PVC size (grow only). The PVC is never
 // deleted by the operator.
 package pen
 
@@ -14,6 +15,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -37,6 +39,10 @@ const (
 	ownerLabelKey = "herdr.dev/owner"
 	// effectiveTTLAnnotation records the TTL used for the current shutdown time.
 	effectiveTTLAnnotation = "pipen.dev/effective-ttl"
+	// homeExpandAnnotation records when the current home expansion started
+	// (RFC3339, from the injected clock). It is set on the size patch and
+	// removed when the provisioned capacity reaches the desired size.
+	homeExpandAnnotation = "pipen.dev/home-expand-at"
 
 	requeueCreating = 10 * time.Second
 	requeuePending  = 30 * time.Second
@@ -45,6 +51,9 @@ const (
 	// recreated by the next pass. The sandbox controller recreates the
 	// pod from the stored podTemplate.
 	requeueReady = 30 * time.Second
+	// homeExpandStallTimeout is how long a home expansion may run before
+	// the pen fails. A fixed constant, not user-configurable.
+	homeExpandStallTimeout = 5 * time.Minute
 )
 
 // Reconciler reconciles Pens using the operator's config.
@@ -116,7 +125,8 @@ func (r *Reconciler) reconcilePen(ctx context.Context, pen *v1alpha1.Pen) (ctrl.
 		return r.fail(ctx, pen, fmt.Sprintf("invalid memory %q: %v", memory, err))
 	}
 
-	if err := r.ensurePVC(ctx, pen, homeQty, cfg); err != nil {
+	growing, err := r.ensurePVC(ctx, pen, homeQty, cfg)
+	if err != nil {
 		return r.fail(ctx, pen, err.Error())
 	}
 	if err := r.ensureService(ctx, pen, cfg); err != nil {
@@ -165,7 +175,12 @@ func (r *Reconciler) reconcilePen(ctx context.Context, pen *v1alpha1.Pen) (ctrl.
 						node = pod.Spec.NodeName
 					}
 				}
-				return r.status(ctx, pen, v1alpha1.PhaseReady, true, hostname, node, "ready")
+				msg := "ready"
+				if growing {
+					// The home grow runs in the background; the pen stays Ready.
+					msg = fmt.Sprintf("growing home to %s", homeQty.String())
+				}
+				return r.status(ctx, pen, v1alpha1.PhaseReady, true, hostname, node, msg)
 			} else if cond.Reason == v1beta1.SandboxReasonSuspended {
 				return r.status(ctx, pen, v1alpha1.PhaseSuspended, false, "", "", "suspended")
 			} else if cond.Reason == v1beta1.SandboxReasonExpired {
@@ -219,13 +234,18 @@ func (r *Reconciler) objectExists(ctx context.Context, key types.NamespacedName,
 	return err == nil
 }
 
-func (r *Reconciler) ensurePVC(ctx context.Context, pen *v1alpha1.Pen, size resource.Quantity, cfg config.Config) error {
+func (r *Reconciler) ensurePVC(ctx context.Context, pen *v1alpha1.Pen, size resource.Quantity, cfg config.Config) (bool, error) {
 	key := types.NamespacedName{Name: pen.Name + "-home", Namespace: pen.Namespace}
 	pvc := &corev1.PersistentVolumeClaim{}
 	if err := r.Reader.Get(ctx, key, pvc); err == nil {
-		return nil // create-or-leave
+		// A pen that pins no home size keeps the provisioned size. The
+		// config default feeds pens created afterwards only.
+		if pen.Spec.HomeSize == "" {
+			return false, nil
+		}
+		return r.convergePVCSize(ctx, pvc, size)
 	} else if !apierrors.IsNotFound(err) {
-		return err
+		return false, err
 	}
 	sclass := cfg.StorageClass
 	var storageClassNamePtr *string
@@ -247,9 +267,98 @@ func (r *Reconciler) ensurePVC(ctx context.Context, pen *v1alpha1.Pen, size reso
 		},
 	}
 	if err := r.Client.Create(ctx, pvc); err != nil {
-		return fmt.Errorf("create pvc %s: %w", key.Name, err)
+		return false, fmt.Errorf("create pvc %s: %w", key.Name, err)
 	}
-	return nil
+	return false, nil
+}
+
+// convergePVCSize moves an existing home PVC to the desired size and
+// reports whether a grow is in flight. A shrink fails (home size can
+// only grow). A grow patches the request once and is watched by the
+// stamp on the claim. When the provisioned capacity reaches the desired
+// size the stamp is removed.
+func (r *Reconciler) convergePVCSize(ctx context.Context, pvc *corev1.PersistentVolumeClaim, size resource.Quantity) (bool, error) {
+	switch size.Cmp(pvcCurrentSize(pvc)) {
+	case -1:
+		return false, fmt.Errorf("home size can only grow")
+	case 1:
+		return r.growPVC(ctx, pvc, size)
+	}
+	if _, ok := pvc.Annotations[homeExpandAnnotation]; !ok {
+		return false, nil // unchanged size: no patch, no annotation
+	}
+	if q := pvc.Status.Capacity[corev1.ResourceStorage]; q.IsZero() {
+		// No provisioned capacity yet: the claim is not bound, or the
+		// volume was lost. The grow is still in flight; growPVC watches
+		// the stamp and fails on a stall.
+		return r.growPVC(ctx, pvc, size)
+	}
+	// The provisioned capacity reached the desired size: the grow completed.
+	delete(pvc.Annotations, homeExpandAnnotation)
+	if err := r.Client.Update(ctx, pvc); err != nil {
+		return false, fmt.Errorf("update pvc %s: %w", pvc.Name, err)
+	}
+	return false, nil
+}
+
+// growPVC starts or watches a home grow. The first pass checks that the
+// storage class allows expansion, patches the request to the desired
+// size, and stamps when this grow started. A claim without a
+// StorageClassName binds to the cluster default, which this check cannot
+// read (get only, no list); the stall timeout covers that case. Later
+// passes wait for the capacity to catch up and fail when the stamp is
+// older than homeExpandStallTimeout.
+func (r *Reconciler) growPVC(ctx context.Context, pvc *corev1.PersistentVolumeClaim, size resource.Quantity) (bool, error) {
+	specSize := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+	if specSize.Cmp(size) == 0 {
+		// The size patch is in flight: watch the stamp.
+		if started, err := time.Parse(time.RFC3339, pvc.Annotations[homeExpandAnnotation]); err == nil {
+			if r.Now().Sub(started) > homeExpandStallTimeout {
+				return false, fmt.Errorf("home expansion stalled: %s", storageClassHint(pvc))
+			}
+			return true, nil
+		}
+	}
+	// First pass (or a lost stamp): check the storage class, patch the
+	// request, and stamp.
+	if name := pvc.Spec.StorageClassName; name != nil {
+		sc := &storagev1.StorageClass{}
+		if err := r.Reader.Get(ctx, types.NamespacedName{Name: *name}, sc); err != nil {
+			return false, fmt.Errorf("cannot read storage class %s", *name)
+		}
+		if sc.AllowVolumeExpansion == nil || !*sc.AllowVolumeExpansion {
+			return false, fmt.Errorf("storage class %s does not allow volume expansion", *name)
+		}
+	}
+	pvc.Spec.Resources.Requests[corev1.ResourceStorage] = size
+	if pvc.Annotations == nil {
+		pvc.Annotations = map[string]string{}
+	}
+	pvc.Annotations[homeExpandAnnotation] = r.Now().UTC().Format(time.RFC3339)
+	if err := r.Client.Update(ctx, pvc); err != nil {
+		return false, fmt.Errorf("update pvc %s: %w", pvc.Name, err)
+	}
+	return true, nil
+}
+
+// pvcCurrentSize is the size a home resize compares against: the
+// provisioned capacity when set, else the spec request (a claim that is
+// not provisioned yet).
+func pvcCurrentSize(pvc *corev1.PersistentVolumeClaim) resource.Quantity {
+	if q := pvc.Status.Capacity[corev1.ResourceStorage]; !q.IsZero() {
+		return q
+	}
+	return pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+}
+
+// storageClassHint names the likely cause of a stalled home grow: the
+// storage class named on the PVC, or the cluster default when the PVC
+// names none.
+func storageClassHint(pvc *corev1.PersistentVolumeClaim) string {
+	if name := pvc.Spec.StorageClassName; name != nil {
+		return fmt.Sprintf("storage class %s must allow volume expansion", *name)
+	}
+	return "the default storage class must allow volume expansion"
 }
 
 func (r *Reconciler) ensureService(ctx context.Context, pen *v1alpha1.Pen, cfg config.Config) error {
@@ -301,18 +410,18 @@ func (r *Reconciler) ensureSandbox(ctx context.Context, pen *v1alpha1.Pen, image
 		needsUpdate := false
 
 		// Resume detection, before the mode below is flipped: the pen is
-		// not paused but the sandbox is still in Suspended mode, so this
-		// reconcile switches it back to Running. The stamp is one-shot per
-		// transition because the flip lands in the same update, so the
-		// next pass already sees Running mode.
-		resumed := !pen.Spec.Paused && sandbox.Spec.OperatingMode == v1beta1.SandboxOperatingModeSuspended
+		// not paused, the sandbox is still in Suspended mode, and the pod
+		// is gone. The stamp is one-shot per transition because the flip
+		// lands in the same update, so the next pass already sees
+		// Running mode.
+		terminated := podTerminated(sandbox)
+		resumed := !pen.Spec.Paused && sandbox.Spec.OperatingMode == v1beta1.SandboxOperatingModeSuspended && terminated
 
-		// 1. operatingMode mismatch with pen.Spec.Paused
-		var desiredMode v1beta1.SandboxOperatingMode
-		if pen.Spec.Paused {
+		// 1. operatingMode: Suspended while the pen is paused, or while
+		// the resume flip waits for the pod to go (terminated above).
+		desiredMode := v1beta1.SandboxOperatingModeRunning
+		if pen.Spec.Paused || (sandbox.Spec.OperatingMode == v1beta1.SandboxOperatingModeSuspended && !terminated) {
 			desiredMode = v1beta1.SandboxOperatingModeSuspended
-		} else {
-			desiredMode = v1beta1.SandboxOperatingModeRunning
 		}
 		if sandbox.Spec.OperatingMode != desiredMode {
 			sandbox.Spec.OperatingMode = desiredMode
@@ -351,6 +460,20 @@ func (r *Reconciler) ensureSandbox(ctx context.Context, pen *v1alpha1.Pen, image
 		if sandbox.Spec.Service == nil || *sandbox.Spec.Service != cfg.SandboxService {
 			sandbox.Spec.Service = &cfg.SandboxService
 			needsUpdate = true
+		}
+
+		// 5. Convergence of the env container resources: a resize sets
+		// spec.cpu or spec.memory, and the stored podTemplate must
+		// follow. A non-paused pen also goes Suspended, so the sandbox
+		// controller deletes the pod and starts one from the new
+		// template. A paused pen gets the template update only.
+		ctr := envContainer(sandbox)
+		if ctr != nil && resourcesDiverge(ctr.Resources, res, pen.Spec.CPU, pen.Spec.Memory) {
+			ctr.Resources = corev1.ResourceRequirements{Requests: res, Limits: res}
+			needsUpdate = true
+			if !pen.Spec.Paused {
+				sandbox.Spec.OperatingMode = v1beta1.SandboxOperatingModeSuspended
+			}
 		}
 
 		if needsUpdate {
@@ -611,6 +734,44 @@ func orDefault(v, def string) string {
 		return def
 	}
 	return v
+}
+
+// envContainer returns the env container of the stored podTemplate, or
+// nil when the template has no env container.
+func envContainer(sandbox *v1beta1.Sandbox) *corev1.Container {
+	for i := range sandbox.Spec.PodTemplate.Spec.Containers {
+		if sandbox.Spec.PodTemplate.Spec.Containers[i].Name == "env" {
+			return &sandbox.Spec.PodTemplate.Spec.Containers[i]
+		}
+	}
+	return nil
+}
+
+// podTerminated reports whether the Suspended condition says the pod is
+// gone (Status True, reason PodTerminated). The resume flip waits for
+// this state. An earlier flip keeps the old pod, so the new size never
+// applies.
+func podTerminated(sandbox *v1beta1.Sandbox) bool {
+	for _, cond := range sandbox.Status.Conditions {
+		if cond.Type == string(v1beta1.SandboxConditionSuspended) {
+			return cond.Status == metav1.ConditionTrue &&
+				cond.Reason == v1beta1.SandboxReasonSuspendedPodTerminated
+		}
+	}
+	return false
+}
+
+// resourcesDiverge reports whether the stored env container cpu or
+// memory differs from the desired value for a field the pen sets
+// explicitly. An empty spec field follows the config default at create
+// time only; later config changes do not move an existing pen.
+func resourcesDiverge(stored corev1.ResourceRequirements, desired corev1.ResourceList, cpu, memory string) bool {
+	if cpu != "" && (stored.Requests.Cpu().Cmp(*desired.Cpu()) != 0 ||
+		stored.Limits.Cpu().Cmp(*desired.Cpu()) != 0) {
+		return true
+	}
+	return memory != "" && (stored.Requests.Memory().Cmp(*desired.Memory()) != 0 ||
+		stored.Limits.Memory().Cmp(*desired.Memory()) != 0)
 }
 
 // newLifecycle returns a retained Sandbox shutdown time for a nonempty TTL.

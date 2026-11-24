@@ -1,9 +1,10 @@
 # Cluster operator write access in THIS developer namespace only.
 # The pipen-operator chart installs the operator once per cluster with
-# cluster-scoped READ-only access to Pens; this Role + its binding grant
-# the per-namespace writes (sandbox/service/pvc create, network policy
-# management, configmap/secret read) so the dev chart stays the single place
-# that opens a namespace.
+# cluster-scoped READ-only access to pens, namespaces and storageclasses;
+# this Role + its binding grant
+# the per-namespace writes (sandbox/service create, pvc create, patch,
+# update, network policy management, configmap/secret read) so the dev
+# chart stays the single place that opens a namespace.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -26,7 +27,7 @@ rules:
     verbs: [create, get, list, watch, update, delete]
   - apiGroups: [""]
     resources: [persistentvolumeclaims]
-    verbs: [create, get, list, watch]
+    verbs: [create, get, list, watch, patch, update]
   - apiGroups: ["networking.k8s.io"]
     resources: [networkpolicies]
     verbs: [get, list, watch, create, update, delete]

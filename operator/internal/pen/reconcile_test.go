@@ -9,7 +9,9 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -1059,12 +1061,190 @@ func getSandbox(t *testing.T, c client.Client) *v1beta1.Sandbox {
 	return sandbox
 }
 
-// suspendedSandboxWithTTL is a suspended sandbox: operatingMode Suspended,
-// an existing shutdownTime, and the stored effective TTL annotation.
+// containerResources builds the env container requests and limits (equal
+// values) from cpu and memory strings.
+func containerResources(cpu, memory string) corev1.ResourceRequirements {
+	parse := func(s string) resource.Quantity {
+		q, err := resource.ParseQuantity(s)
+		if err != nil {
+			panic(err)
+		}
+		return q
+	}
+	res := corev1.ResourceList{
+		corev1.ResourceCPU:    parse(cpu),
+		corev1.ResourceMemory: parse(memory),
+	}
+	return corev1.ResourceRequirements{Requests: res, Limits: res}
+}
+
+// sandboxWithEnvResources is a running sandbox with the env container
+// (cpu and memory requests and limits), the stored effective TTL
+// annotation, and a matching service.
+func sandboxWithEnvResources(ttl string, shutdownTime *metav1.Time, cpu, memory string) *v1beta1.Sandbox {
+	sb := sandboxWithTTL(ttl, shutdownTime)
+	sb.Spec.PodTemplate.Spec.Containers = []corev1.Container{{
+		Name:      "env",
+		Resources: containerResources(cpu, memory),
+	}}
+	return sb
+}
+
+// TestReconcileUnchangedResourcesIsNoOp: an unchanged spec must not touch
+// the sandbox. This pins the update-once behavior of the converge path.
+func TestReconcileUnchangedResourcesIsNoOp(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "1h"
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 9, 0, 0, 0, time.UTC))
+	sandbox := sandboxWithEnvResources("1h", &oldTime, "4", "8Gi")
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, testConfig())
+	got := getSandbox(t, c)
+	if got.ResourceVersion != sandbox.ResourceVersion {
+		t.Errorf("sandbox updated on unchanged spec: resourceVersion %q, want %q", got.ResourceVersion, sandbox.ResourceVersion)
+	}
+}
+
+// TestReconcileResourceMismatchPatchesTemplateAndSuspends: a cpu or
+// memory resize (an explicit spec value) patches the stored podTemplate
+// and sets the sandbox to Suspended, so the sandbox controller deletes
+// the pod and starts one from the new template.
+func TestReconcileResourceMismatchPatchesTemplateAndSuspends(t *testing.T) {
+	pen := newPen()
+	pen.Spec.CPU = "4"
+	pen.Spec.Memory = "8Gi"
+	pen.Spec.TTL = "1h"
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 9, 0, 0, 0, time.UTC))
+	sandbox := sandboxWithEnvResources("1h", &oldTime, "2", "4Gi")
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, testConfig())
+	got := getSandbox(t, c)
+	ctr := got.Spec.PodTemplate.Spec.Containers[0]
+	if ctr.Resources.Requests.Cpu().String() != "4" || ctr.Resources.Limits.Cpu().String() != "4" {
+		t.Errorf("cpu req/lim = %v/%v, want 4/4", ctr.Resources.Requests[corev1.ResourceCPU], ctr.Resources.Limits[corev1.ResourceCPU])
+	}
+	if ctr.Resources.Requests.Memory().String() != "8Gi" || ctr.Resources.Limits.Memory().String() != "8Gi" {
+		t.Errorf("memory req/lim = %v/%v, want 8Gi/8Gi", ctr.Resources.Requests[corev1.ResourceMemory], ctr.Resources.Limits[corev1.ResourceMemory])
+	}
+	if got.Spec.OperatingMode != v1beta1.SandboxOperatingModeSuspended {
+		t.Errorf("operatingMode = %q, want Suspended", got.Spec.OperatingMode)
+	}
+}
+
+// TestReconcilePausedPenGetsTemplateWithoutModeChange: a paused pen whose
+// size changes gets the podTemplate update only. The sandbox stays in its
+// current Suspended mode.
+func TestReconcilePausedPenGetsTemplateWithoutModeChange(t *testing.T) {
+	pen := newPen()
+	pen.Spec.Paused = true
+	pen.Spec.CPU = "4"
+	pen.Spec.Memory = "8Gi"
+	pen.Spec.TTL = "1h"
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 9, 0, 0, 0, time.UTC))
+	sandbox := sandboxWithEnvResources("1h", &oldTime, "2", "4Gi")
+	sandbox.Spec.OperatingMode = v1beta1.SandboxOperatingModeSuspended
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, testConfig())
+	got := getSandbox(t, c)
+	ctr := got.Spec.PodTemplate.Spec.Containers[0]
+	if ctr.Resources.Requests.Cpu().String() != "4" || ctr.Resources.Limits.Cpu().String() != "4" {
+		t.Errorf("cpu req/lim = %v/%v, want 4/4", ctr.Resources.Requests[corev1.ResourceCPU], ctr.Resources.Limits[corev1.ResourceCPU])
+	}
+	if ctr.Resources.Requests.Memory().String() != "8Gi" || ctr.Resources.Limits.Memory().String() != "8Gi" {
+		t.Errorf("memory req/lim = %v/%v, want 8Gi/8Gi", ctr.Resources.Requests[corev1.ResourceMemory], ctr.Resources.Limits[corev1.ResourceMemory])
+	}
+	if got.Spec.OperatingMode != v1beta1.SandboxOperatingModeSuspended {
+		t.Errorf("operatingMode = %q, want Suspended (no mode change for a paused pen)", got.Spec.OperatingMode)
+	}
+}
+
+// TestReconcileConfigChangeDoesNotMoveEmptySpecPen: the config defaults
+// feed pens created afterwards only. A pen that pins no cpu, memory or
+// home size keeps the size it was created with when the config changes.
+func TestReconcileConfigChangeDoesNotMoveEmptySpecPen(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "1h"
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 9, 0, 0, 0, time.UTC))
+	sandbox := sandboxWithEnvResources("1h", &oldTime, "4", "8Gi")
+	pvc := homePVC("10Gi", "10Gi", "mayastor-2")
+	cfg := testConfig()
+	cfg.CPU = "8"
+	cfg.Memory = "16Gi"
+	cfg.HomeSize = "20Gi"
+	objs := []client.Object{ownedNS(t, devNS), pen, sandbox, pvc, storageClassObj(true), svcWithIngress("", "")}
+	objs = append(objs, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, cfg)
+	gotPVC := getHomePVC(t, c)
+	if gotPVC.ResourceVersion != pvc.ResourceVersion {
+		t.Errorf("pvc updated on config change: resourceVersion %q, want %q", gotPVC.ResourceVersion, pvc.ResourceVersion)
+	}
+	if _, ok := gotPVC.Annotations[homeExpandAnnotationKey]; ok {
+		t.Error("expand stamp set on a config change, want none")
+	}
+	if gotPVC.Spec.Resources.Requests.Storage().String() != "10Gi" {
+		t.Errorf("pvc size = %s, want unchanged 10Gi", gotPVC.Spec.Resources.Requests.Storage())
+	}
+	got := getSandbox(t, c)
+	if got.ResourceVersion != sandbox.ResourceVersion {
+		t.Errorf("sandbox updated on config change: resourceVersion %q, want %q", got.ResourceVersion, sandbox.ResourceVersion)
+	}
+	if got.Spec.OperatingMode != v1beta1.SandboxOperatingModeRunning {
+		t.Errorf("operatingMode = %q, want Running (no mode change)", got.Spec.OperatingMode)
+	}
+	ctr := got.Spec.PodTemplate.Spec.Containers[0]
+	if ctr.Resources.Requests.Cpu().String() != "4" || ctr.Resources.Limits.Cpu().String() != "4" {
+		t.Errorf("cpu req/lim = %v/%v, want unchanged 4/4", ctr.Resources.Requests[corev1.ResourceCPU], ctr.Resources.Limits[corev1.ResourceCPU])
+	}
+	if ctr.Resources.Requests.Memory().String() != "8Gi" || ctr.Resources.Limits.Memory().String() != "8Gi" {
+		t.Errorf("memory req/lim = %v/%v, want unchanged 8Gi/8Gi", ctr.Resources.Requests[corev1.ResourceMemory], ctr.Resources.Limits[corev1.ResourceMemory])
+	}
+	p := getPen(t, c)
+	if p.Status.Phase == v1alpha1.PhaseFailed {
+		t.Errorf("phase = %q, want not Failed (message %q)", p.Status.Phase, p.Status.Message)
+	}
+}
+
+// suspendedSandboxWithTTL is a suspended sandbox after the pod is gone:
+// operatingMode Suspended, an existing shutdownTime, the stored effective
+// TTL annotation, and the Suspended condition True with reason
+// PodTerminated.
 func suspendedSandboxWithTTL(ttl string, shutdownTime *metav1.Time) *v1beta1.Sandbox {
 	sb := sandboxWithTTL(ttl, shutdownTime)
 	sb.Spec.OperatingMode = v1beta1.SandboxOperatingModeSuspended
+	sb.Status.Conditions = []metav1.Condition{{
+		Type:   string(v1beta1.SandboxConditionSuspended),
+		Status: metav1.ConditionTrue,
+		Reason: v1beta1.SandboxReasonSuspendedPodTerminated,
+	}}
 	return sb
+}
+
+// TestReconcileTerminatingPodDoesNotFlip: while the pod is still
+// terminating (Suspended condition reason PodTerminating), the reconcile
+// keeps the sandbox Suspended and does not re-stamp the TTL.
+func TestReconcileTerminatingPodDoesNotFlip(t *testing.T) {
+	pen := newPen()
+	pen.Spec.TTL = "1h"
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 7, 0, 0, 0, time.UTC))
+	sandbox := suspendedSandboxWithTTL("1h", &oldTime)
+	sandbox.Status.Conditions[0].Reason = v1beta1.SandboxReasonSuspendedPodTerminating
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceAt(t, c, devNS, testConfig(), time.Date(2026, 11, 24, 8, 0, 0, 0, time.UTC))
+	got := getSandbox(t, c)
+	if got.Spec.OperatingMode != v1beta1.SandboxOperatingModeSuspended {
+		t.Errorf("operatingMode = %q, want Suspended while the pod is still terminating", got.Spec.OperatingMode)
+	}
+	if !got.Spec.ShutdownTime.Equal(&oldTime) {
+		t.Errorf("shutdownTime = %v, want unchanged %v (no re-stamp)", got.Spec.ShutdownTime, oldTime)
+	}
+	if got.ResourceVersion != sandbox.ResourceVersion {
+		t.Errorf("sandbox updated: resourceVersion %q, want %q", got.ResourceVersion, sandbox.ResourceVersion)
+	}
 }
 
 func sandboxWithTTL(ttl string, shutdownTime *metav1.Time) *v1beta1.Sandbox {
@@ -1315,5 +1495,356 @@ func TestReconcileSandboxDeleteRecreatesPod(t *testing.T) {
 	pvc := &corev1.PersistentVolumeClaim{}
 	if err := c.Get(context.Background(), types.NamespacedName{Name: penName + "-home", Namespace: devNS}, pvc); err != nil {
 		t.Errorf("home PVC missing after sandbox recreation: %v", err)
+	}
+}
+
+// --- Home PVC expansion ---
+
+// homeExpandAnnotationKey is the wire key the operator stamps on a home
+// grow. The test pins the literal key, not the production constant, so a
+// rename cannot drift from the stored value.
+const homeExpandAnnotationKey = "pipen.dev/home-expand-at"
+
+func mustQty(s string) resource.Quantity {
+	q, err := resource.ParseQuantity(s)
+	if err != nil {
+		panic(err)
+	}
+	return q
+}
+
+// homePVC returns a home PVC with the given spec size and provisioned
+// capacity ("" for none yet). An empty scName leaves StorageClassName
+// unset, so the claim binds to the cluster default.
+func homePVC(size, capacity, scName string) *corev1.PersistentVolumeClaim {
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: penName + "-home", Namespace: devNS},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceStorage: mustQty(size)},
+			},
+		},
+	}
+	if capacity != "" {
+		pvc.Status.Capacity = corev1.ResourceList{corev1.ResourceStorage: mustQty(capacity)}
+	}
+	if scName != "" {
+		pvc.Spec.StorageClassName = &scName
+	}
+	return pvc
+}
+
+// storageClassObj returns the mayastor-2 StorageClass the test config
+// names, with the given AllowVolumeExpansion.
+func storageClassObj(allowExpansion bool) *storagev1.StorageClass {
+	return &storagev1.StorageClass{
+		ObjectMeta:           metav1.ObjectMeta{Name: "mayastor-2"},
+		AllowVolumeExpansion: &allowExpansion,
+	}
+}
+
+func getHomePVC(t *testing.T, c client.Client) *corev1.PersistentVolumeClaim {
+	t.Helper()
+	pvc := &corev1.PersistentVolumeClaim{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: penName + "-home", Namespace: devNS}, pvc); err != nil {
+		t.Fatalf("get home pvc: %v", err)
+	}
+	return pvc
+}
+
+// homeGrowObjects is the object set for a home-grow reconcile: a Ready
+// sandbox and service (so the pen can reach Ready), the given pen and
+// PVC, extra objects (for example a StorageClass), and the dev bootstrap
+// objects.
+func homeGrowObjects(t *testing.T, pen *v1alpha1.Pen, pvc *corev1.PersistentVolumeClaim, extra ...client.Object) []client.Object {
+	objs := []client.Object{
+		ownedNS(t, devNS), pen, pvc, readySandbox(),
+		svcWithIngress("tobias-smoke.ts.example.net", ""),
+	}
+	objs = append(objs, extra...)
+	return append(objs, devObjects(devNS)...)
+}
+
+// A larger homeSize patches the claim to the new size, stamps when the
+// grow started, and reports the grow in the pen status (still Ready).
+func TestHomeGrowPatchesPVCAndStampsAnnotation(t *testing.T) {
+	pen := newPen()
+	pen.Spec.HomeSize = "20Gi"
+	pvc := homePVC("10Gi", "10Gi", "mayastor-2")
+	c := newClient(t, homeGrowObjects(t, pen, pvc, storageClassObj(true))...)
+	reconcileOnceAt(t, c, devNS, testConfig(), time.Date(2026, 11, 24, 8, 0, 0, 0, time.UTC))
+
+	got := getHomePVC(t, c)
+	if got.Spec.Resources.Requests.Storage().String() != "20Gi" {
+		t.Errorf("pvc size = %s, want 20Gi", got.Spec.Resources.Requests.Storage())
+	}
+	if got.Annotations[homeExpandAnnotationKey] != "2026-11-24T08:00:00Z" {
+		t.Errorf("expand stamp = %q, want 2026-11-24T08:00:00Z", got.Annotations[homeExpandAnnotationKey])
+	}
+	p := getPen(t, c)
+	if p.Status.Phase != v1alpha1.PhaseReady || !p.Status.Ready {
+		t.Errorf("phase = %q ready = %v, want Ready/true while the grow is in flight", p.Status.Phase, p.Status.Ready)
+	}
+	if p.Status.Message != "growing home to 20Gi" {
+		t.Errorf("message = %q, want %q", p.Status.Message, "growing home to 20Gi")
+	}
+}
+
+// A smaller homeSize fails the pen; the claim is left untouched.
+func TestHomeShrinkFailsGrowOnly(t *testing.T) {
+	pen := newPen()
+	pen.Spec.HomeSize = "5Gi"
+	pvc := homePVC("10Gi", "10Gi", "mayastor-2")
+	c := newClient(t, homeGrowObjects(t, pen, pvc, storageClassObj(true))...)
+	reconcileOnce(t, c)
+	p := getPen(t, c)
+	if p.Status.Phase != v1alpha1.PhaseFailed {
+		t.Errorf("phase = %q, want Failed", p.Status.Phase)
+	}
+	if !strings.Contains(p.Status.Message, "home size can only grow") {
+		t.Errorf("message = %q, want 'home size can only grow'", p.Status.Message)
+	}
+	got := getHomePVC(t, c)
+	if got.Spec.Resources.Requests.Storage().String() != "10Gi" {
+		t.Errorf("pvc size = %s, want unchanged 10Gi", got.Spec.Resources.Requests.Storage())
+	}
+	if _, ok := got.Annotations[homeExpandAnnotationKey]; ok {
+		t.Error("expand stamp set on a shrink, want none")
+	}
+}
+
+// A storage class that does not allow expansion fails the pen and names
+// the class; the claim is left untouched. A missing class fails with a
+// read message (the class is absent, not disallowed), the same way.
+func TestHomeGrowFailsWhenStorageClassDisallows(t *testing.T) {
+	run := func(t *testing.T, sc *storagev1.StorageClass, wantMsg string) {
+		pen := newPen()
+		pen.Spec.HomeSize = "20Gi"
+		pvc := homePVC("10Gi", "10Gi", "mayastor-2")
+		var extra []client.Object
+		if sc != nil {
+			extra = append(extra, sc)
+		}
+		c := newClient(t, homeGrowObjects(t, pen, pvc, extra...)...)
+		reconcileOnce(t, c)
+		p := getPen(t, c)
+		if p.Status.Phase != v1alpha1.PhaseFailed {
+			t.Errorf("phase = %q, want Failed", p.Status.Phase)
+		}
+		if !strings.Contains(p.Status.Message, wantMsg) {
+			t.Errorf("message = %q, want it to contain %q", p.Status.Message, wantMsg)
+		}
+		got := getHomePVC(t, c)
+		if got.Spec.Resources.Requests.Storage().String() != "10Gi" {
+			t.Errorf("pvc size = %s, want unchanged 10Gi", got.Spec.Resources.Requests.Storage())
+		}
+		if _, ok := got.Annotations[homeExpandAnnotationKey]; ok {
+			t.Error("expand stamp set on a failed grow, want none")
+		}
+	}
+	t.Run("allowVolumeExpansion false", func(t *testing.T) {
+		run(t, storageClassObj(false), "storage class mayastor-2 does not allow volume expansion")
+	})
+	t.Run("storage class missing", func(t *testing.T) {
+		run(t, nil, "cannot read storage class mayastor-2")
+	})
+}
+
+// A grow whose capacity does not catch up within five minutes of the
+// stamp fails the pen and names the likely cause: the storage class must
+// allow volume expansion.
+func TestHomeGrowStallFails(t *testing.T) {
+	pen := newPen()
+	pen.Spec.HomeSize = "20Gi"
+	pvc := homePVC("20Gi", "10Gi", "mayastor-2")
+	pvc.Annotations = map[string]string{homeExpandAnnotationKey: "2026-11-24T08:00:00Z"}
+	c := newClient(t, homeGrowObjects(t, pen, pvc, storageClassObj(true))...)
+	// six minutes after the stamp: past the five-minute stall timeout
+	reconcileOnceAt(t, c, devNS, testConfig(), time.Date(2026, 11, 24, 8, 6, 0, 0, time.UTC))
+	p := getPen(t, c)
+	if p.Status.Phase != v1alpha1.PhaseFailed {
+		t.Errorf("phase = %q, want Failed after a stalled grow", p.Status.Phase)
+	}
+	if !strings.Contains(p.Status.Message, "home expansion stalled") {
+		t.Errorf("message = %q, want 'home expansion stalled'", p.Status.Message)
+	}
+	if !strings.Contains(p.Status.Message, "mayastor-2") {
+		t.Errorf("message = %q, want the storage class named", p.Status.Message)
+	}
+}
+
+// A stalled grow on a claim without a StorageClassName names the cluster
+// default instead.
+func TestHomeGrowStallFailsWithDefaultStorageClass(t *testing.T) {
+	pen := newPen()
+	pen.Spec.HomeSize = "20Gi"
+	pvc := homePVC("20Gi", "10Gi", "")
+	pvc.Annotations = map[string]string{homeExpandAnnotationKey: "2026-11-24T08:00:00Z"}
+	c := newClient(t, homeGrowObjects(t, pen, pvc)...)
+	reconcileOnceAt(t, c, devNS, testConfig(), time.Date(2026, 11, 24, 8, 6, 0, 0, time.UTC))
+	p := getPen(t, c)
+	if p.Status.Phase != v1alpha1.PhaseFailed {
+		t.Errorf("phase = %q, want Failed after a stalled grow", p.Status.Phase)
+	}
+	if !strings.Contains(p.Status.Message, "home expansion stalled") {
+		t.Errorf("message = %q, want 'home expansion stalled'", p.Status.Message)
+	}
+	if !strings.Contains(p.Status.Message, "default storage class") {
+		t.Errorf("message = %q, want the default storage class named", p.Status.Message)
+	}
+}
+
+// A fresh stamp within the timeout leaves the claim untouched and keeps
+// the grow message (no patch on every pass).
+func TestHomeGrowInFlightWaitsWithoutPatch(t *testing.T) {
+	pen := newPen()
+	pen.Spec.HomeSize = "20Gi"
+	pvc := homePVC("20Gi", "10Gi", "mayastor-2")
+	pvc.Annotations = map[string]string{homeExpandAnnotationKey: "2026-11-24T08:00:00Z"}
+	c := newClient(t, homeGrowObjects(t, pen, pvc, storageClassObj(true))...)
+	before := getHomePVC(t, c)
+	reconcileOnceAt(t, c, devNS, testConfig(), time.Date(2026, 11, 24, 8, 2, 0, 0, time.UTC))
+	got := getHomePVC(t, c)
+	if got.ResourceVersion != before.ResourceVersion {
+		t.Errorf("pvc updated during the grow: resourceVersion %q, want %q", got.ResourceVersion, before.ResourceVersion)
+	}
+	p := getPen(t, c)
+	if p.Status.Phase != v1alpha1.PhaseReady || !p.Status.Ready {
+		t.Errorf("phase = %q ready = %v, want Ready/true while the grow is in flight", p.Status.Phase, p.Status.Ready)
+	}
+	if p.Status.Message != "growing home to 20Gi" {
+		t.Errorf("message = %q, want %q", p.Status.Message, "growing home to 20Gi")
+	}
+}
+
+// The capacity reaching the desired size removes the stamp and returns
+// the pen to the plain ready message.
+func TestHomeGrowCompleteClearsAnnotation(t *testing.T) {
+	pen := newPen()
+	pen.Spec.HomeSize = "20Gi"
+	pvc := homePVC("20Gi", "20Gi", "mayastor-2")
+	pvc.Annotations = map[string]string{homeExpandAnnotationKey: "2026-11-24T08:00:00Z"}
+	c := newClient(t, homeGrowObjects(t, pen, pvc, storageClassObj(true))...)
+	reconcileOnceAt(t, c, devNS, testConfig(), time.Date(2026, 11, 24, 8, 1, 0, 0, time.UTC))
+	got := getHomePVC(t, c)
+	if _, ok := got.Annotations[homeExpandAnnotationKey]; ok {
+		t.Error("expand stamp still set after the grow completed")
+	}
+	if got.Spec.Resources.Requests.Storage().String() != "20Gi" {
+		t.Errorf("pvc size = %s, want 20Gi", got.Spec.Resources.Requests.Storage())
+	}
+	p := getPen(t, c)
+	if p.Status.Phase != v1alpha1.PhaseReady || !p.Status.Ready {
+		t.Errorf("phase = %q ready = %v, want Ready/true", p.Status.Phase, p.Status.Ready)
+	}
+	if p.Status.Message != "ready" {
+		t.Errorf("message = %q, want 'ready' (grow finished)", p.Status.Message)
+	}
+}
+
+// An unchanged size does not touch the claim: no patch, no annotation.
+func TestHomeUnchangedSizeIsNoOp(t *testing.T) {
+	pen := newPen()
+	pen.Spec.HomeSize = "10Gi"
+	pvc := homePVC("10Gi", "10Gi", "mayastor-2")
+	c := newClient(t, homeGrowObjects(t, pen, pvc, storageClassObj(true))...)
+	before := getHomePVC(t, c)
+	reconcileOnce(t, c)
+	got := getHomePVC(t, c)
+	if got.ResourceVersion != before.ResourceVersion {
+		t.Errorf("pvc updated on unchanged size: resourceVersion %q, want %q", got.ResourceVersion, before.ResourceVersion)
+	}
+	if _, ok := got.Annotations[homeExpandAnnotationKey]; ok {
+		t.Error("expand stamp set on unchanged size, want none")
+	}
+}
+
+// A claim whose spec reached the desired size but whose capacity is
+// still empty is not done: it is still in flight. A fresh stamp waits
+// (the stamp is kept, no re-stamp), and a stamp past the five-minute
+// timeout fails. Without the wait, a grow that never provisions loses
+// the stamp and the stall safety net with it.
+func TestHomeGrowZeroCapacityWaitsAndStalls(t *testing.T) {
+	t.Run("fresh stamp keeps waiting", func(t *testing.T) {
+		pen := newPen()
+		pen.Spec.HomeSize = "20Gi"
+		pvc := homePVC("20Gi", "", "mayastor-2") // capacity empty: not provisioned yet
+		pvc.Annotations = map[string]string{homeExpandAnnotationKey: "2026-11-24T08:00:00Z"}
+		c := newClient(t, homeGrowObjects(t, pen, pvc, storageClassObj(true))...)
+		before := getHomePVC(t, c)
+		reconcileOnceAt(t, c, devNS, testConfig(), time.Date(2026, 11, 24, 8, 2, 0, 0, time.UTC))
+		got := getHomePVC(t, c)
+		if got.ResourceVersion != before.ResourceVersion {
+			t.Errorf("pvc updated while waiting: resourceVersion %q, want %q", got.ResourceVersion, before.ResourceVersion)
+		}
+		if got.Annotations[homeExpandAnnotationKey] != "2026-11-24T08:00:00Z" {
+			t.Errorf("expand stamp = %q, want kept 2026-11-24T08:00:00Z", got.Annotations[homeExpandAnnotationKey])
+		}
+		p := getPen(t, c)
+		if p.Status.Phase != v1alpha1.PhaseReady || !p.Status.Ready {
+			t.Errorf("phase = %q ready = %v, want Ready/true while the grow is in flight", p.Status.Phase, p.Status.Ready)
+		}
+		if p.Status.Message != "growing home to 20Gi" {
+			t.Errorf("message = %q, want %q", p.Status.Message, "growing home to 20Gi")
+		}
+	})
+	t.Run("stale stamp fails", func(t *testing.T) {
+		pen := newPen()
+		pen.Spec.HomeSize = "20Gi"
+		pvc := homePVC("20Gi", "", "mayastor-2") // capacity empty: the grow never bound
+		pvc.Annotations = map[string]string{homeExpandAnnotationKey: "2026-11-24T08:00:00Z"}
+		c := newClient(t, homeGrowObjects(t, pen, pvc, storageClassObj(true))...)
+		// six minutes after the stamp: past the five-minute stall timeout
+		reconcileOnceAt(t, c, devNS, testConfig(), time.Date(2026, 11, 24, 8, 6, 0, 0, time.UTC))
+		p := getPen(t, c)
+		if p.Status.Phase != v1alpha1.PhaseFailed {
+			t.Errorf("phase = %q, want Failed after a stalled grow", p.Status.Phase)
+		}
+		if !strings.Contains(p.Status.Message, "home expansion stalled") {
+			t.Errorf("message = %q, want 'home expansion stalled'", p.Status.Message)
+		}
+		if !strings.Contains(p.Status.Message, "mayastor-2") {
+			t.Errorf("message = %q, want the storage class named", p.Status.Message)
+		}
+	})
+}
+
+// A claim without a StorageClassName binds to the cluster default, which
+// the operator cannot read (get only, no list). The grow proceeds and the
+// stall timeout stays the safety net.
+func TestHomeGrowWithoutStorageClassSkipsCheck(t *testing.T) {
+	pen := newPen()
+	pen.Spec.HomeSize = "20Gi"
+	pvc := homePVC("10Gi", "10Gi", "") // no StorageClass object registered: a read would fail
+	c := newClient(t, homeGrowObjects(t, pen, pvc)...)
+	reconcileOnce(t, c)
+	p := getPen(t, c)
+	if p.Status.Phase != v1alpha1.PhaseReady || !p.Status.Ready {
+		t.Errorf("phase = %q ready = %v, want Ready/true (no storage class read for the default)", p.Status.Phase, p.Status.Ready)
+	}
+	got := getHomePVC(t, c)
+	if got.Spec.Resources.Requests.Storage().String() != "20Gi" {
+		t.Errorf("pvc size = %s, want 20Gi", got.Spec.Resources.Requests.Storage())
+	}
+	if got.Annotations[homeExpandAnnotationKey] == "" {
+		t.Error("expand stamp not set")
+	}
+}
+
+// A claim that is not provisioned yet (no capacity) compares against the
+// spec request, so a resize before provisioning still grows.
+func TestHomeGrowUsesSpecSizeWhenCapacityEmpty(t *testing.T) {
+	pen := newPen()
+	pen.Spec.HomeSize = "20Gi"
+	pvc := homePVC("10Gi", "", "mayastor-2")
+	c := newClient(t, homeGrowObjects(t, pen, pvc, storageClassObj(true))...)
+	reconcileOnce(t, c)
+	got := getHomePVC(t, c)
+	if got.Spec.Resources.Requests.Storage().String() != "20Gi" {
+		t.Errorf("pvc size = %s, want 20Gi", got.Spec.Resources.Requests.Storage())
+	}
+	if got.Annotations[homeExpandAnnotationKey] == "" {
+		t.Error("expand stamp not set")
 	}
 }

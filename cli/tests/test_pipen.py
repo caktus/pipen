@@ -440,6 +440,160 @@ class ResumeTest(unittest.TestCase):
         )
 
 
+def observed_pen(observed_generation):
+    pen = smoke_pen()
+    pen["status"]["observedGeneration"] = observed_generation
+    return pen
+
+
+class HomeSizeBytesTest(unittest.TestCase):
+    def test_parses_binary_and_decimal_suffixes(self):
+        self.assertEqual(pipen.home_size_bytes("20Gi"), 20 * 1024**3)
+        self.assertEqual(pipen.home_size_bytes("500M"), 500 * 10**6)
+        self.assertEqual(pipen.home_size_bytes("1024"), 1024)
+
+    def test_returns_none_for_unparseable_values(self):
+        for value in ("", "big", "10Xi", "1Gi2Gi", None):
+            with self.subTest(value=value):
+                self.assertIsNone(pipen.home_size_bytes(value))
+
+
+class ResizeTest(unittest.TestCase):
+    def test_resize_merges_only_the_provided_fields(self):
+        api = FakeApi(
+            [
+                (200, smoke_pen()),
+                (200, {"metadata": {"generation": 18}}),
+                (200, observed_pen(18)),
+            ]
+        )
+
+        result = run_cli(
+            ["resize", "tobias-smoke", "--cpu", "16", "--memory", "32Gi"], api
+        )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            [(method, path) for method, path, _ in api.requests],
+            [("GET", PEN_PATH), ("PUT", PEN_PATH), ("GET", PEN_PATH)],
+        )
+        put = api.requests[1][2]
+        self.assertEqual(put["metadata"]["resourceVersion"], "17")
+        self.assertEqual(
+            put["spec"],
+            {
+                "image": "ghcr.io/caktus/pipen:test",
+                "homeSize": "20Gi",
+                "cpu": "16",
+                "memory": "32Gi",
+                "paused": False,
+                "ttl": "8h",
+                "egress": True,
+            },
+        )
+
+    def test_resize_missing_pen_errors_without_put(self):
+        api = FakeApi([(404, {"message": "not found"})])
+        err = io.StringIO()
+        with mock.patch.object(sys, "stderr", err):
+            with self.assertRaises(SystemExit):
+                run_cli(["resize", "tobias-smoke", "--cpu", "16"], api)
+
+        self.assertIn("not found", err.getvalue())
+        self.assertEqual([method for method, _, _ in api.requests], ["GET"])
+
+    def test_resize_refuses_home_shrink_before_any_put(self):
+        api = FakeApi([(200, smoke_pen())])
+        err = io.StringIO()
+        with mock.patch.object(sys, "stderr", err):
+            with self.assertRaises(SystemExit):
+                run_cli(["resize", "tobias-smoke", "--size", "10Gi"], api)
+
+        self.assertIn("home size can only grow", err.getvalue())
+        self.assertEqual(
+            [(method, path) for method, path, _ in api.requests],
+            [("GET", PEN_PATH)],
+        )
+
+    def test_resize_without_flags_errors_without_requests(self):
+        api = FakeApi([])
+        with self.assertRaises(SystemExit):
+            run_cli(["resize", "tobias-smoke"], api)
+
+        self.assertEqual(api.requests, [])
+
+    def test_resize_keeps_polling_until_the_operator_acknowledges(self):
+        api = FakeApi(
+            [
+                (200, smoke_pen()),
+                (200, {"metadata": {"generation": 18}}),
+                (200, observed_pen(17)),
+                (200, observed_pen(18)),
+            ]
+        )
+        with mock.patch.object(pipen.time, "sleep"):
+            result = run_cli(["resize", "tobias-smoke", "--cpu", "16"], api)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            [method for method, _, _ in api.requests],
+            ["GET", "PUT", "GET", "GET"],
+        )
+
+    def test_resize_dies_when_the_pen_fails_after_a_stale_ready(self):
+        failed = observed_pen(17)
+        failed["status"].update({"phase": "Failed", "ready": False, "message": "boom"})
+        api = FakeApi(
+            [
+                (200, smoke_pen()),
+                (200, {"metadata": {"generation": 18}}),
+                (200, observed_pen(17)),
+                (200, failed),
+            ]
+        )
+        err = io.StringIO()
+        with (
+            mock.patch.object(pipen.time, "sleep"),
+            mock.patch.object(sys, "stderr", err),
+        ):
+            with self.assertRaises(SystemExit):
+                run_cli(["resize", "tobias-smoke", "--cpu", "16"], api)
+
+        self.assertIn("failed: boom", err.getvalue())
+
+    def test_resize_without_a_put_generation_waits_for_ready_only(self):
+        api = FakeApi([(200, smoke_pen()), (200, {}), (200, smoke_pen())])
+
+        result = run_cli(["resize", "tobias-smoke", "--size", "30Gi"], api)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            [method for method, _, _ in api.requests],
+            ["GET", "PUT", "GET"],
+        )
+
+
+class ResizeGenerationTest(unittest.TestCase):
+    def test_put_generation_reads_metadata_generation(self):
+        self.assertEqual(pipen.put_generation({"metadata": {"generation": 18}}), 18)
+
+    def test_put_generation_returns_none_when_unusable(self):
+        for response in (
+            {},
+            {"metadata": {}},
+            {"metadata": {"generation": "18"}},
+            "oops",
+        ):
+            with self.subTest(response=response):
+                self.assertIsNone(pipen.put_generation(response))
+
+    def test_acknowledged_needs_an_observed_generation_at_least_generation(self):
+        self.assertTrue(pipen.acknowledged({"observedGeneration": 18}, 18))
+        self.assertTrue(pipen.acknowledged({"observedGeneration": 19}, 18))
+        self.assertFalse(pipen.acknowledged({"observedGeneration": 17}, 18))
+        self.assertFalse(pipen.acknowledged({"observedGeneration": None}, 18))
+
+
 class ValidateNameTest(unittest.TestCase):
     def test_rejects_uppercase(self):
         with self.assertRaises(SystemExit):

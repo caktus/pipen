@@ -220,6 +220,17 @@ operator. Complete the second step promptly.
 No data is lost in this window. The home PVC and Service stay in place.
 The Role still grants PVC create and read access and Service write access.
 
+## 0.7.1 grants the operator PVC write access
+
+The operator Role gains `patch` and `update` on
+`persistentvolumeclaims`. The operator uses these verbs to grow a pen's
+home PVC on resize. The `pipen-operator` chart (0.5.1) adds `get` on
+`storageclasses` to the operator ClusterRole. The operator reads the
+storage class to check that home expansion is allowed.
+
+On upgrade, pens keep their size. Nothing changes at install time. The
+upgrade is a plain `helm upgrade`. You do not need to touch any pen.
+
 ## 0.6.2 docs only
 
 The `DEV_USER` bullet now says the guest unix user is the dev name (the

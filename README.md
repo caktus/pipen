@@ -54,6 +54,12 @@ docker.io direnv npm unzip`, uv, fnm, Node 24, and
 - Pause. `pipen pause <name>` stops the pen pod and keeps the Pen, the home
   PVC, and the tailnet hostname. `pipen resume <name>` starts the pod again
   with a fresh TTL
+- Resize. `pipen resize <name> --cpu 8 --memory 16Gi --size 20Gi` changes the
+  pen's CPU, memory, or home size. Pass only the flags that change. A CPU or
+  memory change restarts the pen pod with the new size. The pen passes
+  through the Suspended phase and comes back with a fresh TTL, like a
+  resume. A home size change grows the PVC in place, and the home data
+  stays. The home size can only grow. A smaller `--size` is refused
 - Auto shutdown after the window. A TTL (a time limit, for example `8h`)
   shuts the pen down when the window ends. Set one per pen with
   `pipen up --ttl 8h`, or set the operator default
@@ -101,6 +107,7 @@ An admin bootstraps you once (see Admins) and gives you the
    pipen ssh myenv         # or: ssh <you>@<hostname> (hostname printed by up)
    pipen pause myenv       # stop the pod; the Pen, PVC and hostname stay
    pipen resume myenv      # start a paused pen again; the TTL starts fresh
+   pipen resize myenv      # change cpu, memory or home size
    pipen ls                # pens: phase, TTL, node, hostname
    pipen logs myenv        # pod logs (entrypoint + sshd)
    pipen down myenv        # deletes the Pen; the Sandbox, pod, Service and egress policy go (when egress is on), the PVC survives
@@ -318,8 +325,8 @@ This creates, in namespace `pipen`:
   chart vendors the pinned v1.0.12 release asset. It creates the pen pod
   from each Sandbox. The chart README documents the upgrade path
 - ServiceAccount + Deployment (one replica; leader election is on)
-- A cluster-scoped READ-ONLY ClusterRole/RoleBinding on Pens only, and the
-  leader-election Role in `pipen`
+- A cluster-scoped READ-ONLY ClusterRole/RoleBinding on pens, namespaces
+  and storageclasses, and the leader-election Role in `pipen`
 - The ConfigMap `pipen-operator-config` with the cluster shape: default
   image, home size, cpu/memory, node selector, storage class, tailscale
   Service annotations, tailnet domain, default TTL, egress hosts. Change it (or the chart values) and
@@ -387,8 +394,8 @@ This creates, in namespace `<namespacePrefix><dev>` (default `env-<dev>`; the la
   on `pods/log`. Nothing else. In particular it holds **no** pod, Service
   or pvc create. The operator's own ServiceAccount brings the pen up, via
   the separate `pipen-operator` Role the same chart creates (sandboxes,
-  networkpolicies, services, pvc create, pod reads, configmap/secret read,
-  and still **no pvc delete**). The agent-sandbox controller creates the
+  networkpolicies, services, pvc create, patch, update, pod reads,
+  configmap/secret read, and still **no pvc delete**). The agent-sandbox controller creates the
   pod. The admin-only data wipe stays with the admin. Nothing is cluster-wide, and
   nothing reaches other namespaces
 - The explicit ServiceAccount token Secret `deploy-token`

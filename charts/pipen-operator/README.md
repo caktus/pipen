@@ -21,7 +21,8 @@ Or from a repo checkout: `helm install operator charts/pipen-operator ...`.
 - Namespace `pipen`
 - CustomResourceDefinition for `pens.pipen.dev`
 - ServiceAccount `pipen-operator`
-- ClusterRole/ClusterRoleBinding `pipen-operator` (cluster-wide Pen watch)
+- ClusterRole/ClusterRoleBinding `pipen-operator` (cluster-wide read of
+  pens, namespaces, and storageclasses)
 - Role/RoleBinding for the per-namespace writes the dev chart grants
 - Deployment `pipen-operator` (one replica, leader election on)
 - ConfigMap `pipen-operator-config`
@@ -59,6 +60,17 @@ extensions.
 | `operatorConfig.egressHosts`    | list   | Approved egress FQDNs. A pen with egress enabled can reach these hosts. Empty: no per-pen egress policy.                          |
 
 ## Upgrade
+
+### Version 0.5.1
+
+The ClusterRole gains `get` on `storageclasses` (group
+`storage.k8s.io`). The operator reads the storage class to check that
+home expansion is allowed before it grows a pen's home PVC. The matching
+`dev-namespace` chart 0.7.1 adds `patch` and `update` on
+`persistentvolumeclaims` to the operator Role.
+
+On upgrade, pens keep their size. Nothing changes at install time. The
+upgrade is a plain `helm upgrade`. You do not need to touch any pen.
 
 ### Version 0.5.0
 
@@ -126,6 +138,8 @@ creates the pen pod from the Sandbox pod template. The pod keeps the name
 `env-<pen>`, and the home PVC stays a separate claim.
 
 The operator updates the operating mode, shutdown time, and Service setting
-on an existing Sandbox. It does not update the pod template on that Sandbox.
-A later agent-sandbox pod recreation uses the stored Sandbox pod template.
-The home PVC stays a separate claim through pod recreation.
+on an existing Sandbox. On a cpu or memory resize it also updates the
+container resources in the stored pod template and sets the Sandbox to
+Suspended, so the pod comes back from the new template. A paused pen gets
+the template update only. A pod recreation always uses the stored Sandbox
+pod template. The home PVC stays a separate claim through pod recreation.

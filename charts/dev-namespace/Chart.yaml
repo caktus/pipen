@@ -2,6 +2,6 @@ apiVersion: v2
 name: dev-namespace
 description: Provisions a per-developer herdr dev namespace (Namespace + ServiceAccount + ns-scoped RBAC + SA token + ssh-key secret)
 type: application
-version: 0.7.0
+version: 0.7.1
 appVersion: "0.1.0"
 home: https://github.com/caktus/pipen
