@@ -67,21 +67,37 @@ namespace. This includes the Sandbox CRD and the agent-sandbox controller.
 The operator now reconciles each pen as a Sandbox instead of creating the
 pen pod directly.
 
-An existing cluster must meet these conditions before the upgrade:
+Before the upgrade, remove any separate agent-sandbox installation. Two
+installations of the same cluster-scoped objects conflict. Keep the pinned
+release asset as the source of these objects.
 
-- Upgrade the `dev-namespace` chart to 0.7.0 or later. Its operator Role
-  grants Sandbox and NetworkPolicy access and removes pod write access.
-- Remove any separate agent-sandbox installation. Two installations of the
-  same cluster-scoped objects conflict. Keep the pinned release asset as
-  the source of these objects.
-- Keep the home PVCs. The Sandbox uses the existing home PVC and creates no
-  `volumeClaimTemplates`.
-- Set `operatorConfig.defaultTTL` to a duration such as `8h` for automatic
-  shutdown. Empty keeps automatic shutdown off.
-- Keep `operatorConfig.sandboxService` false to use only the tailscale
-  Service for each pen.
-- Set `operatorConfig.egressHosts` to the approved FQDNs before enabling
-  egress on a pen. An empty list creates no per-pen egress policy.
+Upgrade an existing cluster in this order:
+
+1. Upgrade every `dev-namespace` release to 0.7.0 or later. Its operator
+   Role grants Sandbox and NetworkPolicy access and removes pod write
+   access.
+2. Upgrade the `pipen-operator` release to 0.5.0 or later. This installs
+   the agent-sandbox controller and starts the new operator.
+
+The first step creates a short failure window until the second step
+finishes. The old operator cannot create or delete pods. Existing pens can
+show reconcile errors. New pens cannot start. You do not need to pause the
+operator. Complete the second step promptly.
+
+No data is lost in this window. The home PVC and Service stay in place.
+The Role still grants PVC create and read access and Service write access.
+
+Keep the home PVCs. The Sandbox uses the existing home PVC and creates no
+`volumeClaimTemplates`.
+
+The new configuration keys have these defaults:
+
+- `operatorConfig.defaultTTL` is empty. Automatic shutdown stays off. Set
+  a duration such as `8h` to enable it.
+- `operatorConfig.sandboxService` is false. Only the tailscale Service
+  exists for each pen.
+- `operatorConfig.egressHosts` is empty. No per-pen egress policy exists.
+  Set the approved FQDNs before enabling egress on a pen.
 
 To upgrade agent-sandbox later, replace
 `templates/agent-sandbox-sandbox.yaml` with the next pinned release asset.

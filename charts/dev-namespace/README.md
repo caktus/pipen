@@ -200,13 +200,20 @@ creates and deletes the pods.
 
 The developer Role does not change. It keeps `get` on `pods` and `pods/log`.
 
-An existing cluster must meet these conditions before the upgrade:
+Upgrade an existing cluster in this order:
 
-- Upgrade the `pipen-operator` chart to 0.5.0 or later. It installs the
-  agent-sandbox controller in `agent-sandbox-system`.
-- Keep the old operator Role until both charts use the new versions. A new
-  operator with the old Role cannot manage Sandboxes.
-- Keep the home PVCs. This Role change does not delete them.
+1. Upgrade every `dev-namespace` release to 0.7.0 or later.
+2. Upgrade the `pipen-operator` release to 0.5.0 or later. It installs the
+   agent-sandbox controller in `agent-sandbox-system` and starts the new
+   operator.
+
+The first step creates a short failure window until the second step
+finishes. The old operator cannot create or delete pods. Existing pens can
+show reconcile errors. New pens cannot start. You do not need to pause the
+operator. Complete the second step promptly.
+
+No data is lost in this window. The home PVC and Service stay in place.
+The Role still grants PVC create and read access and Service write access.
 
 ## 0.6.2 docs only
 

@@ -1,7 +1,9 @@
 # Operator config: cluster shape the reconciler applies to pens. The
-# operator watches this ConfigMap; a change re-reconciles all pens
-# (create-or-leave: existing pod/service/pvc specs are untouched, so the
-# change applies to pens created afterwards).
+# operator watches this ConfigMap; a change re-reconciles all pens.
+# defaultTTL changes the shutdown time, and sandboxService changes the
+# Service setting on an existing Sandbox. The pod template on an existing
+# Sandbox stays unchanged. Service and PVC specs stay unchanged. An egress
+# policy change applies to an existing pen with egress enabled.
 apiVersion: v1
 kind: ConfigMap
 metadata:
