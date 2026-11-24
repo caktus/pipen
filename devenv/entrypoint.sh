@@ -10,6 +10,8 @@
 # /home below lands before either daemon starts.
 #   /var/lib/herdr/secret/authorized_keys  — dev Secret `herdr-dev-<namespace>` (bootstrap)
 #   /var/lib/herdr/config/{models.json,settings.json,litellm_key}
+#   /var/lib/herdr/credentials/*, user Secret the pen names by
+#   annotation (all keys, optional)
 # (the k8s mounts land at /run/herdr; herdr-boot copies them to
 # /var/lib/herdr before systemd remounts /run — see herdr-boot)
 #                                       — env ConfigMap built from
@@ -101,6 +103,52 @@ for name in models.json settings.json litellm_key; do
         rm -f "${marker}"
     fi
 done
+
+# --- credentials from the projected user Secret (all keys, as-is) ----------
+# No name list here: every file in the dir lands in
+# ${DEV_HOME}/.herdr/credentials/ under its own name (dir 0700, files 0600)
+# and leaves a sha256 marker under ${DEV_HOME}/.herdr/projected-credentials.
+# A key absent or zero-byte on a later boot drops the placed copy while it
+# still matches the marker. A file the developer wrote or edited has a
+# different hash (or no marker) and stays. A missing dir and empty files
+# read as absent: no install, no marker. Dangling entries never reach
+# /var/lib/herdr (herdr-boot skips them).
+CRED_DIR="${DEV_HOME}/.herdr/credentials"
+install -d -m 700 -o "${DEV_USER}" -g "${DEV_USER}" "${DEV_HOME}/.herdr"
+install -d -m 700 -o "${DEV_USER}" -g "${DEV_USER}" "${CRED_DIR}"
+CRED_MARKER_DIR="${DEV_HOME}/.herdr/projected-credentials"
+install -d -m 700 "${CRED_MARKER_DIR}"
+# dot-named keys (.env, .netrc) are legal Secret keys, so dotglob keeps the
+# globs below seeing them, and nullglob keeps a missing dir a no-op
+shopt -s nullglob dotglob
+for src in /var/lib/herdr/credentials/*; do
+    [ -f "${src}" ] || continue
+    name="${src##*/}"
+    dest="${CRED_DIR}/${name}"
+    marker="${CRED_MARKER_DIR}/${name}.sha256"
+    if [ -s "${src}" ]; then
+        install -m 600 -o "${DEV_USER}" -g "${DEV_USER}" "${src}" "${dest}"
+        printf '%s\n' "$(sha256sum "${src}" | cut -d' ' -f1)" > "${marker}"
+        chown "${DEV_USER}:${DEV_USER}" "${marker}"
+    fi
+done
+# drop-on-delete: a marker whose key is gone (or zero-byte) now removes the
+# placed copy while it still matches the marker, then the marker
+for marker in "${CRED_MARKER_DIR}"/*.sha256; do
+    [ -f "${marker}" ] || continue
+    name="${marker##*/}"
+    name="${name%.sha256}"
+    src="/var/lib/herdr/credentials/${name}"
+    if [ ! -s "${src}" ]; then
+        dest="${CRED_DIR}/${name}"
+        if [ -f "${dest}" ] && \
+            [ "$(sha256sum "${dest}" | cut -d' ' -f1)" = "$(cat "${marker}")" ]; then
+            rm -f "${dest}"
+        fi
+        rm -f "${marker}"
+    fi
+done
+shopt -u nullglob dotglob
 
 # direnv hook in the dev user's .bashrc (dev-VM convention; idempotent).
 # Plain shell — not `bash -c '…' -u HOME=…`: with -c the operands after the

@@ -396,8 +396,10 @@ helm install <dev> charts/dev-namespace \
 This creates, in namespace `<namespacePrefix><dev>` (default `env-<dev>`; the label `herdr.dev/owner` holds the bare `dev`):
 
 - ServiceAccount `deploy` and a namespace-scoped Role/RoleBinding. The role
-  covers the pens CRD (`pens`, `pens/status`), `get` on `pods`, and `get`
-  on `pods/log`. Nothing else. In particular it holds **no** pod, Service
+  covers the pens CRD (`pens`, `pens/status`), `get` on `pods`, `get`
+  on `pods/log`, and `create, get, update, delete` on `secrets` (the
+  developer's own pen credential Secrets). In particular it holds
+  **no** pod, Service
   or pvc create. The operator's own ServiceAccount brings the pen up, via
   the separate `pipen-operator` Role the same chart creates (sandboxes,
   networkpolicies, services, pvc create, patch, update, pod reads,
@@ -436,6 +438,41 @@ Two supported modes:
 
 The rendering and key management belong to your cluster tooling (the private
 deployment repo).
+
+### Pen credentials (a Secret)
+
+A value a pen must hold privately, for example a model API key, goes in a
+Secret instead of the ConfigMap. The developer token manages Secrets in
+its own namespace, so the developer sets this up with `kubectl` and the
+token.
+
+1. Create a Secret. The key names may be anything, dot names included:
+
+   ```sh
+   kubectl -n env-<dev> create secret generic my-creds \
+     --from-literal=token=<value>
+   ```
+
+2. Point the pen at the Secret with the `pens.pipen.dev/credentials`
+   annotation. The pen name is `<you>-<pen>` (your dev name plus the pen
+   you asked for):
+
+   ```sh
+   kubectl -n env-<dev> patch pen <you>-<pen> --type=merge \
+     -p '{"metadata":{"annotations":{"pens.pipen.dev/credentials":"my-creds"}}}'
+   ```
+
+3. The operator restarts the pen once to add the volume. After the
+   restart, every non-empty key in the Secret lands in the pen at
+   `~/.herdr/credentials/<key>`, mode 0600, in a 0700 directory.
+
+4. To rotate a credential, change the Secret and then recreate the pod:
+   `pipen pause <pen>` and `pipen resume <pen>`. The pause keeps the
+   annotation, so the mount survives. A changed value reaches the pen
+   at pod recreation, the same contract as the SSH keys.
+
+A missing Secret does not fail the pen. It runs without the credential
+files. The ConfigMap path is unchanged for non-sensitive values.
 
 ### 5. Hand the CLI configuration to the developer
 
@@ -482,8 +519,10 @@ the actual capacity depends on your StorageClass.
   ServiceAccount token. It turns off TLS certificate verification for that
   hop. The API server certificate carries no tailnet SAN. Token
   authentication over the private tailnet is the documented posture
-- Every verb that the CLI uses is granted by the bootstrap role, and nothing
-  more: the pens CRD, `get` on `pods`, and `get` on `pods/log`. That scoping
+- The bootstrap role grants the complete set: the pens CRD, `get` on
+  `pods`, `get` on `pods/log`, and `create, get, update, delete` on
+  `secrets` (for the kubectl steps above, on the developer's own pen
+  credential Secrets). That scoping
   works when the cluster runs `--authorization-mode=RBAC`. On an AlwaysAllow
   cluster, the cluster itself is the boundary. In particular, the role for
   the token holds no pvc delete and no pod create. The data wipe and the pod

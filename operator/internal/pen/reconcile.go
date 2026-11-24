@@ -43,6 +43,9 @@ const (
 	// (RFC3339, from the injected clock). It is set on the size patch and
 	// removed when the provisioned capacity reaches the desired size.
 	homeExpandAnnotation = "pipen.dev/home-expand-at"
+	// credentialsAnnotation is the pen annotation that names the
+	// credentials Secret in the pen's namespace.
+	credentialsAnnotation = "pens.pipen.dev/credentials"
 
 	requeueCreating = 10 * time.Second
 	requeuePending  = 30 * time.Second
@@ -467,9 +470,21 @@ func (r *Reconciler) ensureSandbox(ctx context.Context, pen *v1alpha1.Pen, image
 		// follow. A non-paused pen also goes Suspended, so the sandbox
 		// controller deletes the pod and starts one from the new
 		// template. A paused pen gets the template update only.
-		ctr := envContainer(sandbox)
+		ctr := envContainer(&sandbox.Spec.PodTemplate.Spec)
 		if ctr != nil && resourcesDiverge(ctr.Resources, res, pen.Spec.CPU, pen.Spec.Memory) {
 			ctr.Resources = corev1.ResourceRequirements{Requests: res, Limits: res}
+			needsUpdate = true
+			if !pen.Spec.Paused {
+				sandbox.Spec.OperatingMode = v1beta1.SandboxOperatingModeSuspended
+			}
+		}
+
+		// 6. Convergence of the credentials volume: an annotation added,
+		// removed, or renamed patches the stored podTemplate (volume and
+		// mount follow). The non-paused pen goes Suspended through the
+		// same cycle as a resize. A missing Secret means an empty
+		// projection, so the operator never reads the Secret.
+		if applyCredentials(&sandbox.Spec.PodTemplate.Spec, pen.Annotations[credentialsAnnotation]) {
 			needsUpdate = true
 			if !pen.Spec.Paused {
 				sandbox.Spec.OperatingMode = v1beta1.SandboxOperatingModeSuspended
@@ -552,6 +567,10 @@ func (r *Reconciler) ensureSandbox(ctx context.Context, pen *v1alpha1.Pen, image
 			},
 		},
 	}
+
+	// The credentials annotation adds an optional Secret volume (all
+	// keys) and its read-only mount to the pod spec.
+	applyCredentials(&spec, pen.Annotations[credentialsAnnotation])
 
 	// Set operatingMode based on pen.Spec.Paused
 	operatingMode := v1beta1.SandboxOperatingModeRunning
@@ -741,15 +760,88 @@ func orDefault(v, def string) string {
 	return v
 }
 
-// envContainer returns the env container of the stored podTemplate, or
-// nil when the template has no env container.
-func envContainer(sandbox *v1beta1.Sandbox) *corev1.Container {
-	for i := range sandbox.Spec.PodTemplate.Spec.Containers {
-		if sandbox.Spec.PodTemplate.Spec.Containers[i].Name == "env" {
-			return &sandbox.Spec.PodTemplate.Spec.Containers[i]
+// envContainer returns the env container of the pod spec, or nil when
+// the spec has no env container.
+func envContainer(spec *corev1.PodSpec) *corev1.Container {
+	for i := range spec.Containers {
+		if spec.Containers[i].Name == "env" {
+			return &spec.Containers[i]
 		}
 	}
 	return nil
+}
+
+// applyCredentials makes the dev-credentials volume and the env
+// container mount of the pod spec match secretName (the value of the
+// credentials annotation; empty means absent) and reports whether it
+// changed the spec. The volume projects all keys and is optional, so a
+// missing Secret leaves an empty projection and the pod still starts.
+func applyCredentials(spec *corev1.PodSpec, secretName string) bool {
+	changed := false
+	var wantVol *corev1.Volume
+	if secretName != "" {
+		optional := true
+		wantVol = &corev1.Volume{
+			Name: "dev-credentials",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: secretName,
+					Optional:   &optional,
+				},
+			},
+		}
+	}
+	volIdx := -1
+	for i := range spec.Volumes {
+		if spec.Volumes[i].Name == "dev-credentials" {
+			volIdx = i
+			break
+		}
+	}
+	switch {
+	case wantVol == nil && volIdx >= 0:
+		spec.Volumes = append(spec.Volumes[:volIdx], spec.Volumes[volIdx+1:]...)
+		changed = true
+	case wantVol != nil && volIdx >= 0:
+		if !reflect.DeepEqual(spec.Volumes[volIdx], *wantVol) {
+			spec.Volumes[volIdx] = *wantVol
+			changed = true
+		}
+	case wantVol != nil:
+		spec.Volumes = append(spec.Volumes, *wantVol)
+		changed = true
+	}
+	ctr := envContainer(spec)
+	if ctr == nil {
+		return changed
+	}
+	var wantMount *corev1.VolumeMount
+	if secretName != "" {
+		wantMount = &corev1.VolumeMount{
+			Name: "dev-credentials", MountPath: "/run/herdr/credentials", ReadOnly: true,
+		}
+	}
+	mountIdx := -1
+	for i := range ctr.VolumeMounts {
+		if ctr.VolumeMounts[i].Name == "dev-credentials" {
+			mountIdx = i
+			break
+		}
+	}
+	switch {
+	case wantMount == nil && mountIdx >= 0:
+		ctr.VolumeMounts = append(ctr.VolumeMounts[:mountIdx], ctr.VolumeMounts[mountIdx+1:]...)
+		changed = true
+	case wantMount != nil && mountIdx >= 0:
+		if !reflect.DeepEqual(ctr.VolumeMounts[mountIdx], *wantMount) {
+			ctr.VolumeMounts[mountIdx] = *wantMount
+			changed = true
+		}
+	case wantMount != nil:
+		ctr.VolumeMounts = append(ctr.VolumeMounts, *wantMount)
+		changed = true
+	}
+	return changed
 }
 
 // podTerminated reports whether the Suspended condition says the pod is
