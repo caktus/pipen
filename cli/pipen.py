@@ -262,6 +262,7 @@ def set_paused(args, cfg, api, paused: bool, expected_phase: str) -> int:
     if status != 200:
         die(f"pen update failed: HTTP {status} {response}")
     deadline = time.time() + args.timeout
+    last = None
     while time.time() < deadline:
         _, current = get_pen(api, ns, env)
         f = pen_status_fields(current)
@@ -269,7 +270,9 @@ def set_paused(args, cfg, api, paused: bool, expected_phase: str) -> int:
             print(f"pipen: pen {env} {expected_phase.lower()}")
             return 0
         info = f["phase"] + (f": {f['message']}" if f["message"] else "")
-        print(f"pipen: {env} {info} …", flush=True)
+        if info != last:
+            print(f"pipen: {env} {info} …", flush=True)
+            last = info
         time.sleep(POLL_SECONDS)
     die(
         f"pen {env} not {expected_phase.lower()} within {args.timeout}s — `pipen ls` shows status"
@@ -312,11 +315,21 @@ def now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def remaining_ttl(shutdown_at: str | None, current_time: datetime) -> str:
+def remaining_ttl(shutdown_at: object, current_time: datetime) -> str:
     if not shutdown_at:
         return "-"
-    shutdown_time = datetime.fromisoformat(shutdown_at.replace("Z", "+00:00"))
-    seconds = max(0, int((shutdown_time - current_time).total_seconds()))
+    if not isinstance(shutdown_at, str):
+        return "unknown"
+    try:
+        shutdown_time = datetime.fromisoformat(shutdown_at.replace("Z", "+00:00"))
+    except ValueError:
+        return "unknown"
+    if shutdown_time.tzinfo is None or shutdown_time.utcoffset() is None:
+        return "unknown"
+    try:
+        seconds = max(0, int((shutdown_time - current_time).total_seconds()))
+    except (TypeError, ValueError, OverflowError):
+        return "unknown"
     hours, remainder = divmod(seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
     if hours:

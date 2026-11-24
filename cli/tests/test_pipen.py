@@ -217,6 +217,20 @@ class RemainingTtlTest(unittest.TestCase):
         now = datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc)
         self.assertEqual(pipen.remaining_ttl(None, now), "-")
 
+    def test_returns_unknown_for_invalid_shutdown_times(self):
+        now = datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc)
+        for value in ("not-a-time", "2026-11-21T20:00:00", 123):
+            with self.subTest(value=value):
+                self.assertEqual(pipen.remaining_ttl(value, now), "unknown")
+
+    def test_clamps_past_shutdown_time_to_zero_seconds(self):
+        now = datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc)
+        self.assertEqual(pipen.remaining_ttl("2026-11-21T11:00:00Z", now), "0s")
+
+    def test_formats_near_future_in_seconds(self):
+        now = datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc)
+        self.assertEqual(pipen.remaining_ttl("2026-11-21T12:00:30Z", now), "30s")
+
 
 class LsTest(unittest.TestCase):
     def test_lists_suspended_phase_and_remaining_ttl(self):
@@ -250,6 +264,58 @@ class LsTest(unittest.TestCase):
         self.assertEqual(
             lines[2].split(),
             ["tobias-other", "Ready", "-", "node-1", "smoke.ts.net"],
+        )
+
+    def test_invalid_ttl_does_not_hide_other_pens(self):
+        invalid = smoke_pen()
+        invalid["status"]["shutdownAt"] = "not-a-time"
+        valid = smoke_pen()
+        valid["metadata"]["name"] = "tobias-other"
+        valid["status"]["shutdownAt"] = "2026-11-21T20:00:00Z"
+        api = FakeApi([(200, {"items": [invalid, valid]})])
+        now = datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc)
+        output = io.StringIO()
+        with (
+            mock.patch.object(pipen, "now", return_value=now),
+            mock.patch.object(sys, "stdout", output),
+        ):
+            result = run_cli(["ls"], api)
+
+        self.assertEqual(result, 0)
+        lines = output.getvalue().splitlines()
+        self.assertEqual(
+            lines[1].split(),
+            ["tobias-smoke", "Ready", "unknown", "node-1", "smoke.ts.net"],
+        )
+        self.assertEqual(
+            lines[2].split(),
+            ["tobias-other", "Ready", "8h0m", "node-1", "smoke.ts.net"],
+        )
+
+    def test_lists_past_and_near_future_shutdown_times(self):
+        past = smoke_pen()
+        past["status"]["shutdownAt"] = "2026-11-21T11:00:00Z"
+        near_future = smoke_pen()
+        near_future["metadata"]["name"] = "tobias-other"
+        near_future["status"]["shutdownAt"] = "2026-11-21T12:00:30Z"
+        api = FakeApi([(200, {"items": [past, near_future]})])
+        now = datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc)
+        output = io.StringIO()
+        with (
+            mock.patch.object(pipen, "now", return_value=now),
+            mock.patch.object(sys, "stdout", output),
+        ):
+            result = run_cli(["ls"], api)
+
+        self.assertEqual(result, 0)
+        lines = output.getvalue().splitlines()
+        self.assertEqual(
+            lines[1].split(),
+            ["tobias-smoke", "Ready", "0s", "node-1", "smoke.ts.net"],
+        )
+        self.assertEqual(
+            lines[2].split(),
+            ["tobias-other", "Ready", "30s", "node-1", "smoke.ts.net"],
         )
 
 
@@ -295,6 +361,36 @@ class PauseTest(unittest.TestCase):
                 },
             },
         )
+
+
+class PollingTest(unittest.TestCase):
+    def test_pause_suppresses_repeated_status_messages(self):
+        waiting = smoke_pen()
+        waiting["spec"]["paused"] = True
+        waiting["status"].update(
+            {"phase": "Creating", "ready": False, "message": "waiting"}
+        )
+        suspended = smoke_pen()
+        suspended["spec"]["paused"] = True
+        suspended["status"].update({"phase": "Suspended", "ready": False})
+        api = FakeApi(
+            [
+                (200, smoke_pen()),
+                (200, {}),
+                (200, waiting),
+                (200, waiting),
+                (200, suspended),
+            ]
+        )
+        output = io.StringIO()
+        with (
+            mock.patch.object(pipen.time, "sleep"),
+            mock.patch.object(sys, "stdout", output),
+        ):
+            result = run_cli(["pause", "tobias-smoke"], api)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(output.getvalue().count("Creating: waiting"), 1)
 
 
 class ResumeTest(unittest.TestCase):
