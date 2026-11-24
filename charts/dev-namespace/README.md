@@ -39,9 +39,9 @@ Or from a repo checkout: `helm install <dev> charts/dev-namespace ...`.
   `pens/status`, `get` on `pods`, `get` on `pods/log` (no pod, Service or PVC
   create, no pvc delete)
 - `Role`/`RoleBinding` `pipen-operator` (in the same namespace): the
-  per-namespace writes for the operator's ServiceAccount (pods, services, pvc
-  create, pens/status update, configmap/secret get limited to the
-  `herdr-dev-<namespace>` objects, plus reads on all of them)
+  per-namespace writes for the operator's ServiceAccount (Sandbox, Service,
+  PVC, and NetworkPolicy management, pens/status update, pod reads,
+  configmap/secret get limited to the `herdr-dev-<namespace>` objects)
 - `Secret` `deploy-token` (`kubernetes.io/service-account-token`); the token
   controller fills `data.token` after a delay
 - `Secret` `herdr-dev-<namespace>`: the ssh public keys
@@ -189,6 +189,24 @@ pod labels on your cluster against this rule:
 kubectl -n <tailscale namespace> get pods \
   -l tailscale.com/parent-resource-type --show-labels
 ```
+
+## 0.7.0 grants Sandbox and NetworkPolicy access
+
+The operator now reconciles each pen as an agent-sandbox Sandbox. Its Role
+can manage `sandboxes.agents.x-k8s.io` and `networkpolicies`. The pod rule
+now allows only `get`, `list`, and `watch`. The operator needs pod reads
+for pen status. The developer token reads logs. The agent-sandbox controller
+creates and deletes the pods.
+
+The developer Role does not change. It keeps `get` on `pods` and `pods/log`.
+
+An existing cluster must meet these conditions before the upgrade:
+
+- Upgrade the `pipen-operator` chart to 0.5.0 or later. It installs the
+  agent-sandbox controller in `agent-sandbox-system`.
+- Keep the old operator Role until both charts use the new versions. A new
+  operator with the old Role cannot manage Sandboxes.
+- Keep the home PVCs. This Role change does not delete them.
 
 ## 0.6.2 docs only
 

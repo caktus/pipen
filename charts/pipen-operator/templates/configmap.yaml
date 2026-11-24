@@ -21,3 +21,6 @@ data:
   imagePullPolicy: {{ .Values.config.imagePullPolicy | quote }}
   loadBalancerClass: {{ .Values.config.loadBalancerClass | quote }}
   runtimeClass: {{ .Values.config.runtimeClass | quote }}
+  defaultTTL: {{ .Values.operatorConfig.defaultTTL | quote }}
+  sandboxService: {{ .Values.operatorConfig.sandboxService | quote }}
+  egressHosts: {{ join "," .Values.operatorConfig.egressHosts | quote }}

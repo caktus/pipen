@@ -39,3 +39,15 @@ config:
   loadBalancerClass: "tailscale"
   # Runtime class for env pods. Empty (default): no runtime class.
   runtimeClass: ""
+
+# Sandbox and egress settings, rendered into ConfigMap pipen-operator-config.
+operatorConfig:
+  # Default time before a pen shuts down, for example "8h". Empty (default):
+  # no automatic shutdown. A pen's ttl value overrides this default.
+  defaultTTL: ""
+  # Let the agent-sandbox controller create a Service for each sandbox.
+  # False (default): only the tailscale Service exists.
+  sandboxService: false
+  # Approved egress FQDNs. A pen with egress enabled can reach these hosts.
+  # Empty (default): no per-pen egress policy.
+  egressHosts: []
