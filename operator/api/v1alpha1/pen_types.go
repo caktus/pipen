@@ -19,6 +19,8 @@ const (
 	PhaseReady Phase = "Ready"
 	// PhaseFailed: reconciliation hit an error (status.message says why).
 	PhaseFailed Phase = "Failed"
+	// PhaseSuspended: the pen is paused (operatingMode = Suspended).
+	PhaseSuspended Phase = "Suspended"
 )
 
 // PenSpec is the desired state of a pen (a kata dev environment).
@@ -36,6 +38,16 @@ type PenSpec struct {
 	// Memory is the pod memory request and limit (default 8Gi).
 	// +optional
 	Memory string `json:"memory,omitempty"`
+	// Paused stops the pen's compute while keeping PVC and Service.
+	// +optional
+	Paused bool `json:"paused,omitempty"`
+	// TTL is a duration like "8h" after which the pen shuts itself down.
+	// +optional
+	TTL string `json:"ttl,omitempty"`
+	// Egress enables a NetworkPolicy that restricts egress to approved
+	// destinations.
+	// +optional
+	Egress bool `json:"egress,omitempty"`
 }
 
 // PenStatus is the observed state of a pen.
@@ -57,6 +69,9 @@ type PenStatus struct {
 	// Message carries a human-readable explanation for non-Ready states.
 	// +optional
 	Message string `json:"message,omitempty"`
+	// ShutdownAt is the time after which the pen auto-shuts down.
+	// +optional
+	ShutdownAt *metav1.Time `json:"shutdownAt,omitempty"`
 }
 
 // +kubebuilder:object:root=true
