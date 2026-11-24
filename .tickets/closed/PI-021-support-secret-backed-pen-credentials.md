@@ -2,12 +2,12 @@
 id: PI-021
 github_issue: 21
 github_url: https://github.com/caktus/pipen/issues/21
-last_synced: "2026-11-24T22:31:23.541724+00:00"
+last_synced: "2026-11-24T22:37:22.395352+00:00"
 synced_hash: ea513ad490b07d0465118c41450d8a09311fb450115ac7e3c749d492b580d2e2
 title: Support Secret-backed pen credentials
 assignee: "@me"
 labels:
-  - phase/review
+  - phase/done
 context:
   relates_to: []
 ---
