@@ -1,16 +1,26 @@
 #!/usr/bin/env bash
-# herdr env entrypoint (PID 1, runs as root inside the kata guest).
+# herdr env bootstrap (root, runs as pen-setup.service — Type=oneshot,
+# RemainAfterExit=yes — ordered before docker.service and ssh.service by
+# their drop-ins). systemd is PID 1 in the pen: this script used to be
+# the container entrypoint that tail-called dockerd (background) and
+# sshd (foreground); those are now the stock units.
 #
-# Projects the per-env inputs, then runs dockerd (background) and sshd
-# (foreground, key-only):
-#   /run/herdr/secret/authorized_keys  — dev Secret `herdr-dev-<namespace>` (bootstrap)
-#   /run/herdr/config/{models.json,settings.json,litellm_key}
+# Projects the per-env inputs, then leaves. docker.service and
+# ssh.service both carry After=pen-setup.service, so every root write to
+# /home below lands before either daemon starts.
+#   /var/lib/herdr/secret/authorized_keys  — dev Secret `herdr-dev-<namespace>` (bootstrap)
+#   /var/lib/herdr/config/{models.json,settings.json,litellm_key}
+# (the k8s mounts land at /run/herdr; herdr-boot copies them to
+# /var/lib/herdr before systemd remounts /run — see herdr-boot)
 #                                       — env ConfigMap built from
 #                                         `herdr-dev-<namespace>` (bootstrap)
 # The config files are each optional: a pen whose ConfigMap carries none of
 # them still boots, and the developer signs in to their own model-provider
 # account inside.
-# Env: DEV_USER (required), TAILNET_HOSTNAME (informational).
+# Env: DEV_USER (required), TAILNET_HOSTNAME (informational). The k8s
+# container env is the PID 1 (systemd) process environment, which systemd
+# does not pass to services; pen-env-import.service copies it into the
+# manager environment before this unit runs (see pen-setup.service).
 #
 # /home is the per-env mayastor-2 PVC: the dev user's home lives there and
 # survives pod recreation. Everything else (incl. dockerd's /var/lib/docker
@@ -36,6 +46,8 @@ fi
 # docker group membership: dockerd runs as root in the guest and its socket
 # is group-docker, so the dev user gets `docker` without sudo (dev-VM parity)
 usermod -aG docker "${DEV_USER}"
+# journal read without sudo: the journal files are root:systemd-journal
+usermod -aG systemd-journal "${DEV_USER}"
 install -d -m 700 "${DEV_HOME}"
 chown -R "${DEV_USER}:${DEV_USER}" "${DEV_HOME}"
 
@@ -51,7 +63,7 @@ chmod 0440 /etc/sudoers.d/90-herdr
 # --- ssh (key-only): authorized_keys from the projected Secret --------------
 install -d -m 700 -o "${DEV_USER}" -g "${DEV_USER}" "${DEV_HOME}/.ssh"
 install -m 600 -o "${DEV_USER}" -g "${DEV_USER}" \
-    /run/herdr/secret/authorized_keys "${DEV_HOME}/.ssh/authorized_keys"
+    /var/lib/herdr/secret/authorized_keys "${DEV_HOME}/.ssh/authorized_keys"
 
 # --- pi.dev config from the projected ConfigMap -----------------------------
 # Each key is optional, and a zero-byte entry reads as absent: a pen whose
@@ -64,7 +76,7 @@ install -m 600 -o "${DEV_USER}" -g "${DEV_USER}" \
 MARKER_DIR="/home/.herdr/projected"
 install -d -m 700 "${MARKER_DIR}"
 for name in models.json settings.json litellm_key; do
-    src="/run/herdr/config/${name}"
+    src="/var/lib/herdr/config/${name}"
     marker="${MARKER_DIR}/${name}.sha256"
     if [ "${name}" = "litellm_key" ]; then
         dest="${DEV_HOME}/.litellm_key"   # same placement as the dev-VM flow
@@ -101,18 +113,20 @@ if ! grep -qxF 'eval "$(direnv hook bash)"' "${DEV_HOME}/.bashrc" 2>/dev/null; t
 fi
 chown "${DEV_USER}:${DEV_USER}" "${DEV_HOME}/.bashrc"
 
-# --- dockerd (background; data-root on the ephemeral rootfs by design) ------
-dockerd > /var/log/dockerd.log 2>&1 &
+# dockerd runs as docker.service (After=pen-setup.service); its data-root
+# is /var/lib/docker on the ephemeral rootfs by design, and the cgroup
+# driver is pinned in /etc/docker/daemon.json.
 
 # --- per-env ssh host keys (stable across pod recreation) --------------------
-# The image bakes one static host-key set (ssh-keygen -A, under /etc/ssh on the
-# ephemeral kata rootfs), so every env presents the same key and host-key
-# verification cannot tell envs apart. On first boot, generate a set for this
-# env on the /home PVC (which survives pod recreation), then copy it onto the
-# /etc/ssh/ssh_host_*_key paths before sshd starts. The base sshd_config leaves
-# the HostKey lines commented out, so sshd loads exactly those paths. The env
-# shows its own key from its first boot and keeps it for its whole life, so a
-# client sees one known_hosts prompt per env, ever.
+# The image bakes one static host-key set (ssh-keygen -A, under /etc/ssh on
+# the ephemeral kata rootfs), so every env presents the same key and
+# host-key verification cannot tell envs apart. On first boot, generate a
+# set for this env on the /home PVC (which survives pod recreation), then
+# copy it onto the /etc/ssh/ssh_host_*_key paths before sshd starts. The
+# base sshd_config leaves the HostKey lines commented out, so sshd loads
+# exactly those paths. The env shows its own key from its first boot and
+# keeps it for its whole life, so a client sees one known_hosts prompt per
+# env, ever.
 HOST_KEYS_DIR="/home/.herdr/ssh-host-keys"
 install -d -m 700 "${HOST_KEYS_DIR}"
 ensure_ssh_host_key() {
@@ -137,13 +151,12 @@ for key_type in ed25519 ecdsa rsa; do
     ensure_ssh_host_key "${key_type}"
 done
 
-# --- sshd (foreground, key-only, no root login) ------------------------------
-install -d /run/sshd
+# --- sshd (key-only, no root login): ssh.service reads this drop-in ---------
+# Written before ssh.service starts (After=pen-setup.service), not at sshd
+# exec time as the old entrypoint did.
 cat > /etc/ssh/sshd_config.d/99-herdr.conf <<'EOF'
 PermitRootLogin no
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PubkeyAuthentication yes
 EOF
-
-exec /usr/sbin/sshd -D -e

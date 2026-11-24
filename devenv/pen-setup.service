@@ -1,0 +1,16 @@
+[Unit]
+Description=herdr pen bootstrap (dev user, persistent home, projected config, ssh host keys)
+Wants=pen-env-import.service
+After=pen-env-import.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# DEV_USER comes from the k8s container env. The k8s env lands on the PID 1
+# (systemd) process, and pen-env-import.service (Before= this unit) copies
+# it into the manager environment, which systemd passes to every service.
+# No Environment= line: the dev name is operator-set, never baked in.
+ExecStart=/usr/local/bin/herdr-entrypoint
+
+[Install]
+WantedBy=multi-user.target

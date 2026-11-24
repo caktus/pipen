@@ -1,4 +1,5 @@
 {
   "features": { "containerd-snapshotter": true },
-  "storage-driver": "native"
+  "storage-driver": "native",
+  "exec-opts": [ "native.cgroupdriver=systemd" ]
 }

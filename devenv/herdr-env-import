@@ -1,0 +1,16 @@
+#!/bin/sh
+# Import the k8s container env that PID 1 (systemd) received into the
+# systemd manager environment, so every service started afterwards sees
+# it. The manager's process environment is NOT passed to services, but
+# the manager environment (systemctl set-environment) is — that is the
+# supported way to carry container env (DEV_USER) into units without
+# baking in a dev name.
+set -eu
+import() {
+    val="$(tr '\0' '\n' < /proc/1/environ | sed -n "s/^$1=//p" | head -n 1)"
+    if [ -n "$val" ]; then
+        systemctl set-environment "$1=$val"
+    fi
+}
+import DEV_USER
+import TAILNET_HOSTNAME

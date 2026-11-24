@@ -1,0 +1,11 @@
+[Unit]
+Description=Import the container env (DEV_USER) into the systemd manager environment
+Before=pen-setup.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/herdr-env-import
+
+[Install]
+WantedBy=multi-user.target
