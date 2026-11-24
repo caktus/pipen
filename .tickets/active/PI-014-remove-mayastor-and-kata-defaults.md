@@ -2,12 +2,12 @@
 id: PI-014
 github_issue: 14
 github_url: https://github.com/caktus/pipen/issues/14
-last_synced: "2026-11-24T04:55:32.531100+00:00"
+last_synced: "2026-11-24T05:30:54.122526+00:00"
 synced_hash: 5022b6a00747aef1bf8c3d58f0aded44a028ae501fa4746d5e1540d6b2f0096f
 title: Remove Mayastor and Kata defaults
 assignee: "@me"
 labels:
-  - phase/in-progress
+  - phase/review
 context:
   relates_to: []
 ---
