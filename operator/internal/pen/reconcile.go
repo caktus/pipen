@@ -21,6 +21,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	v1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+
 	v1alpha1 "github.com/caktus/pipen/operator/api/v1alpha1"
 	"github.com/caktus/pipen/operator/internal/config"
 )
@@ -113,25 +115,67 @@ func (r *Reconciler) reconcilePen(ctx context.Context, pen *v1alpha1.Pen) (ctrl.
 		corev1.ResourceCPU:    cpuQty,
 		corev1.ResourceMemory: memQty,
 	}
-	if err := r.ensurePod(ctx, pen, image, devUser, res, cfg); err != nil {
+	if err := r.ensureSandbox(ctx, pen, image, devUser, res, cfg); err != nil {
 		return r.fail(ctx, pen, err.Error())
 	}
 
-	pod := &corev1.Pod{}
-	if err := r.Reader.Get(ctx, types.NamespacedName{Name: podName(pen.Name), Namespace: pen.Namespace}, pod); err != nil {
-		return r.fail(ctx, pen, fmt.Sprintf("cannot read pod: %v", err))
+	// Read sandbox status
+	sandbox := &v1beta1.Sandbox{}
+	if err := r.Reader.Get(ctx, types.NamespacedName{Name: podName(pen.Name), Namespace: pen.Namespace}, sandbox); err != nil {
+		return r.fail(ctx, pen, fmt.Sprintf("cannot read sandbox: %v", err))
 	}
-	if !podReady(pod) {
-		msg := "pod " + podName(pen.Name) + " " + podProgress(pod)
-		return r.status(ctx, pen, v1alpha1.PhaseCreating, false, "", "", msg)
+
+	// Always mirror shutdownTime to pen status so CLI can render remaining TTL
+	if sandbox.Spec.ShutdownTime != nil {
+		pen.Status.ShutdownAt = sandbox.Spec.ShutdownTime
+	} else {
+		pen.Status.ShutdownAt = nil
 	}
-	hostname := r.serviceHostname(ctx, pen)
-	if hostname == "" {
-		return r.status(ctx, pen, v1alpha1.PhaseCreating, false, "", "",
-			"pod ready, waiting for tailnet hostname on service "+pen.Name)
+
+	// Map sandbox conditions to pen status
+	for _, cond := range sandbox.Status.Conditions {
+		switch cond.Type {
+		case string(v1beta1.SandboxConditionReady):
+			if cond.Status == metav1.ConditionTrue && cond.Reason == v1beta1.SandboxReasonDependenciesReady {
+				hostname := r.serviceHostname(ctx, pen)
+				if hostname == "" {
+					return r.status(ctx, pen, v1alpha1.PhaseCreating, false, "", "",
+						"sandbox ready, waiting for tailnet hostname on service "+pen.Name)
+				}
+				// Sandbox status may have node name
+				node := sandbox.Status.NodeName
+				if node == "" {
+					// Fall back to reading pod for node (for pipen logs)
+					pod := &corev1.Pod{}
+					if err := r.Reader.Get(ctx, types.NamespacedName{Name: podName(pen.Name), Namespace: pen.Namespace}, pod); err == nil {
+						node = pod.Spec.NodeName
+					}
+				}
+				return r.status(ctx, pen, v1alpha1.PhaseReady, true, hostname, node, "ready")
+			} else if cond.Reason == v1beta1.SandboxReasonSuspended {
+				return r.status(ctx, pen, v1alpha1.PhaseSuspended, false, "", "", "suspended")
+			} else if cond.Reason == v1beta1.SandboxReasonExpired {
+				// Expired sandbox is not ready
+				return r.status(ctx, pen, v1alpha1.PhaseCreating, false, "", "", "sandbox expired, will resume on next reconcile")
+			} else if cond.Reason == v1beta1.SandboxReasonReconcilerError {
+				return r.fail(ctx, pen, cond.Message)
+			} else {
+				// DependenciesNotReady or other reasons
+				return r.status(ctx, pen, v1alpha1.PhaseCreating, false, "", "", cond.Message)
+			}
+		case string(v1beta1.SandboxConditionSuspended):
+			if cond.Status == metav1.ConditionTrue {
+				return r.status(ctx, pen, v1alpha1.PhaseSuspended, false, "", "", "suspended")
+			}
+		case string(v1beta1.SandboxConditionPodScheduled):
+			if cond.Status == metav1.ConditionFalse {
+				return r.status(ctx, pen, v1alpha1.PhaseCreating, false, "", "", cond.Message)
+			}
+		}
 	}
-	node := pod.Spec.NodeName // the node a scheduled pod landed on
-	return r.status(ctx, pen, v1alpha1.PhaseReady, true, hostname, node, "ready")
+
+	// No Ready condition found
+	return r.status(ctx, pen, v1alpha1.PhaseCreating, false, "", "", "sandbox not ready, no conditions yet")
 }
 
 // namespaceProvisioned returns the owner label value (the dev name the
@@ -231,24 +275,87 @@ func (r *Reconciler) ensureService(ctx context.Context, pen *v1alpha1.Pen, cfg c
 	return nil
 }
 
-func (r *Reconciler) ensurePod(ctx context.Context, pen *v1alpha1.Pen, image, devUser string, res corev1.ResourceList, cfg config.Config) error {
+func (r *Reconciler) ensureSandbox(ctx context.Context, pen *v1alpha1.Pen, image, devUser string, res corev1.ResourceList, cfg config.Config) error {
 	key := types.NamespacedName{Name: podName(pen.Name), Namespace: pen.Namespace}
-	pod := &corev1.Pod{}
-	if err := r.Reader.Get(ctx, key, pod); err == nil {
-		return nil // create-or-leave
+	sandbox := &v1beta1.Sandbox{}
+	if err := r.Reader.Get(ctx, key, sandbox); err == nil {
+		// Convergence: check if spec needs update
+		needsUpdate := false
+		// 1. operatingMode mismatch with pen.Spec.Paused
+		var desiredMode v1beta1.SandboxOperatingMode
+		if pen.Spec.Paused {
+			desiredMode = v1beta1.SandboxOperatingModeSuspended
+		} else {
+			desiredMode = v1beta1.SandboxOperatingModeRunning
+		}
+		if sandbox.Spec.OperatingMode != desiredMode {
+			sandbox.Spec.OperatingMode = desiredMode
+			needsUpdate = true
+		}
+
+		// 2. Compute desired lifecycle from TTL
+		var desiredLifecycle v1beta1.Lifecycle
+		ttl := pen.Spec.TTL
+		if ttl == "" {
+			ttl = cfg.DefaultTTL
+		}
+		if ttl != "" {
+			duration, err := time.ParseDuration(ttl)
+			if err != nil {
+				return fmt.Errorf("invalid TTL %q: %w", ttl, err)
+			}
+			shutdownTime := metav1.NewTime(time.Now().Add(duration))
+			retainPolicy := v1beta1.ShutdownPolicyRetain
+			desiredLifecycle.ShutdownTime = &shutdownTime
+			desiredLifecycle.ShutdownPolicy = &retainPolicy
+		}
+
+		// 3. Check if sandbox expired and needs fresh shutdownTime
+		// If sandbox reports Ready=False reason=SandboxExpired while not paused
+		expired := false
+		for _, cond := range sandbox.Status.Conditions {
+			if cond.Type == string(v1beta1.SandboxConditionReady) &&
+				cond.Status == metav1.ConditionFalse &&
+				cond.Reason == v1beta1.SandboxReasonExpired &&
+				!pen.Spec.Paused {
+				expired = true
+				break
+			}
+		}
+
+		// Update lifecycle if TTL changed or sandbox expired
+		if (sandbox.Spec.ShutdownTime == nil && desiredLifecycle.ShutdownTime != nil) ||
+			(sandbox.Spec.ShutdownTime != nil && desiredLifecycle.ShutdownTime == nil) ||
+			(sandbox.Spec.ShutdownTime != nil && desiredLifecycle.ShutdownTime != nil &&
+				!sandbox.Spec.ShutdownTime.Equal(desiredLifecycle.ShutdownTime)) ||
+			expired {
+			sandbox.Spec.Lifecycle = desiredLifecycle
+			needsUpdate = true
+		}
+
+		// 4. Update service if config changed
+		if sandbox.Spec.Service == nil || *sandbox.Spec.Service != cfg.SandboxService {
+			sandbox.Spec.Service = &cfg.SandboxService
+			needsUpdate = true
+		}
+
+		if needsUpdate {
+			if err := r.Client.Update(ctx, sandbox); err != nil {
+				return fmt.Errorf("update sandbox %s: %w", key.Name, err)
+			}
+		}
+		return nil
 	} else if !apierrors.IsNotFound(err) {
 		return err
 	}
+
+	// Create new sandbox
 	hostname := pen.Name
 	if cfg.TailnetDomain != "" {
 		hostname = pen.Name + "." + cfg.TailnetDomain
 	}
 	privileged := true
-	// pens run no cluster-credentialed client, so the pod mounts no
-	// ServiceAccount token.
 	automountToken := false
-	// the dev ConfigMap keys are optional: a pen whose ConfigMap carries
-	// none of them still boots.
 	devConfigOptional := true
 	secKey := "herdr-dev-" + pen.Namespace
 	cmKey := "herdr-dev-" + pen.Namespace
@@ -308,19 +415,58 @@ func (r *Reconciler) ensurePod(ctx context.Context, pen *v1alpha1.Pen, image, de
 			},
 		},
 	}
-	pod = &corev1.Pod{
+
+	// Set operatingMode based on pen.Spec.Paused
+	operatingMode := v1beta1.SandboxOperatingModeRunning
+	if pen.Spec.Paused {
+		operatingMode = v1beta1.SandboxOperatingModeSuspended
+	}
+
+	// Set lifecycle if TTL is set
+	var lifecycle v1beta1.Lifecycle
+	ttl := pen.Spec.TTL
+	if ttl == "" {
+		ttl = cfg.DefaultTTL
+	}
+	if ttl != "" {
+		// Parse duration and set shutdownTime
+		duration, err := time.ParseDuration(ttl)
+		if err != nil {
+			return fmt.Errorf("invalid TTL %q: %w", ttl, err)
+		}
+		shutdownTime := metav1.NewTime(time.Now().Add(duration))
+		retainPolicy := v1beta1.ShutdownPolicyRetain
+		lifecycle.ShutdownTime = &shutdownTime
+		lifecycle.ShutdownPolicy = &retainPolicy
+	}
+
+	sandbox = &v1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      key.Name,
 			Namespace: pen.Namespace,
 			Labels:    map[string]string{ownerLabel: pen.Name},
 		},
-		Spec: spec,
+		Spec: v1beta1.SandboxSpec{
+			SandboxBlueprint: v1beta1.SandboxBlueprint{
+				PodTemplate: v1beta1.PodTemplate{
+					Spec: spec,
+					ObjectMeta: v1beta1.PodMetadata{
+						Labels: map[string]string{ownerLabel: pen.Name},
+					},
+				},
+				Service:              &cfg.SandboxService,
+				FailedPodPolicy:      v1beta1.FailedPodPolicyRetain,
+				VolumeClaimTemplates: []v1beta1.PersistentVolumeClaimTemplate{},
+			},
+			Lifecycle:     lifecycle,
+			OperatingMode: operatingMode,
+		},
 	}
-	if err := controllerutil.SetControllerReference(pen, pod, r.Scheme); err != nil {
+	if err := controllerutil.SetControllerReference(pen, sandbox, r.Scheme); err != nil {
 		return err
 	}
-	if err := r.Client.Create(ctx, pod); err != nil {
-		return fmt.Errorf("create pod %s: %w", key.Name, err)
+	if err := r.Client.Create(ctx, sandbox); err != nil {
+		return fmt.Errorf("create sandbox %s: %w", key.Name, err)
 	}
 	return nil
 }
