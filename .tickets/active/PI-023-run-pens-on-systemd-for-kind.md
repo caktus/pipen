@@ -1,9 +1,9 @@
 ---
-id: PI-017
-github_issue: null
-github_url: null
-last_synced: null
-synced_hash: null
+id: PI-023
+github_issue: 23
+github_url: https://github.com/caktus/pipen/issues/23
+last_synced: "2026-11-24T04:41:34.010799+00:00"
+synced_hash: 249fca14730b5ccdb2cf7eaa0dd46579b58ea7990c9c64ab78bf9d07db8d941e
 title: Run pens on systemd for kind
 type: Task
 assignee: "@me"
