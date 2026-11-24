@@ -1896,3 +1896,232 @@ func TestHomeGrowUsesSpecSizeWhenCapacityEmpty(t *testing.T) {
 		t.Error("expand stamp not set")
 	}
 }
+
+// --- Credentials annotation ---
+
+// credentialsAnnotationKey is the annotation that names the pen's
+// credentials Secret. The test pins the literal key, not the production
+// constant, so a rename cannot drift from the wire value.
+const credentialsAnnotationKey = "pens.pipen.dev/credentials"
+
+// storedCredentialsVolume returns the dev-credentials volume of the
+// stored podTemplate, or nil when the template has no such volume.
+func storedCredentialsVolume(sb *v1beta1.Sandbox) *corev1.Volume {
+	for i := range sb.Spec.PodTemplate.Spec.Volumes {
+		if sb.Spec.PodTemplate.Spec.Volumes[i].Name == "dev-credentials" {
+			return &sb.Spec.PodTemplate.Spec.Volumes[i]
+		}
+	}
+	return nil
+}
+
+// storedCredentialsMount returns the dev-credentials mount of the env
+// container, or nil when the container has no such mount.
+func storedCredentialsMount(sb *v1beta1.Sandbox) *corev1.VolumeMount {
+	for i := range sb.Spec.PodTemplate.Spec.Containers {
+		ctr := &sb.Spec.PodTemplate.Spec.Containers[i]
+		if ctr.Name != "env" {
+			continue
+		}
+		for j := range ctr.VolumeMounts {
+			if ctr.VolumeMounts[j].Name == "dev-credentials" {
+				return &ctr.VolumeMounts[j]
+			}
+		}
+	}
+	return nil
+}
+
+// sandboxWithCredentials is a running sandbox whose env container matches
+// the explicit cpu and memory the pen pins, plus the stored
+// dev-credentials volume and mount when secret is nonempty.
+func sandboxWithCredentials(ttl string, shutdownTime *metav1.Time, secret string) *v1beta1.Sandbox {
+	sb := sandboxWithEnvResources(ttl, shutdownTime, "4", "8Gi")
+	if secret == "" {
+		return sb
+	}
+	optional := true
+	sb.Spec.PodTemplate.Spec.Volumes = append(sb.Spec.PodTemplate.Spec.Volumes, corev1.Volume{
+		Name: "dev-credentials",
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{SecretName: secret, Optional: &optional},
+		},
+	})
+	sb.Spec.PodTemplate.Spec.Containers[0].VolumeMounts = append(sb.Spec.PodTemplate.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
+		Name: "dev-credentials", MountPath: "/run/herdr/credentials", ReadOnly: true,
+	})
+	return sb
+}
+
+// A new pen with the credentials annotation gets a dev-credentials
+// Secret volume (all keys, optional, no item list) and a read-only mount
+// at /run/herdr/credentials. A pen without the annotation gets neither.
+func TestCredentialsAnnotationOnNewSandbox(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		secret string // "" means no annotation
+	}{
+		{name: "with annotation", secret: "model-keys"},
+		{name: "without annotation", secret: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pen := newPen()
+			if tc.secret != "" {
+				pen.Annotations = map[string]string{credentialsAnnotationKey: tc.secret}
+			}
+			objs := append([]client.Object{ownedNS(t, devNS), pen}, devObjects(devNS)...)
+			c := newClient(t, objs...)
+			reconcileOnce(t, c)
+			sb := getSandbox(t, c)
+			v := storedCredentialsVolume(sb)
+			m := storedCredentialsMount(sb)
+			if tc.secret == "" {
+				if v != nil {
+					t.Errorf("dev-credentials volume = %+v, want none", v)
+				}
+				if m != nil {
+					t.Errorf("dev-credentials mount = %+v, want none", m)
+				}
+				return
+			}
+			if v == nil || v.Secret == nil {
+				t.Fatalf("dev-credentials volume = %+v, want a Secret volume", v)
+			}
+			if v.Secret.SecretName != tc.secret {
+				t.Errorf("secret name = %q, want %q", v.Secret.SecretName, tc.secret)
+			}
+			if v.Secret.Items != nil {
+				t.Errorf("items = %+v, want none (all keys)", v.Secret.Items)
+			}
+			if v.Secret.Optional == nil || !*v.Secret.Optional {
+				t.Errorf("optional = %v, want true", v.Secret.Optional)
+			}
+			if m == nil {
+				t.Fatalf("dev-credentials mount = %+v, want one", m)
+			}
+			if m.MountPath != "/run/herdr/credentials" {
+				t.Errorf("mountPath = %q, want /run/herdr/credentials", m.MountPath)
+			}
+			if !m.ReadOnly {
+				t.Error("readOnly = false, want true")
+			}
+		})
+	}
+}
+
+// A credentials annotation added, removed, or renamed on an existing pen
+// patches the stored podTemplate (volume and mount follow) and moves an
+// unpaused pen to Suspended: the same suspend cycle a resource resize
+// uses. The pod goes and comes back from the new template.
+func TestCredentialsAnnotationConvergesStoredTemplate(t *testing.T) {
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 9, 0, 0, 0, time.UTC))
+	for _, tc := range []struct {
+		name   string
+		pen    string // the annotation value; "" means no annotation
+		stored string // the stored volume secret; "" means no volume
+		want   string // the volume secret after; "" means no volume
+	}{
+		{name: "annotation added", pen: "model-keys", stored: "", want: "model-keys"},
+		{name: "annotation removed", pen: "", stored: "model-keys", want: ""},
+		{name: "annotation renamed", pen: "rotated-keys", stored: "model-keys", want: "rotated-keys"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pen := newPen()
+			pen.Spec.CPU = "4"
+			pen.Spec.Memory = "8Gi"
+			pen.Spec.TTL = "1h"
+			if tc.pen != "" {
+				pen.Annotations = map[string]string{credentialsAnnotationKey: tc.pen}
+			}
+			sb := sandboxWithCredentials("1h", &oldTime, tc.stored)
+			objs := append([]client.Object{ownedNS(t, devNS), pen, sb}, devObjects(devNS)...)
+			c := newClient(t, objs...)
+			reconcileOnceWith(t, c, devNS, testConfig())
+			got := getSandbox(t, c)
+			v := storedCredentialsVolume(got)
+			m := storedCredentialsMount(got)
+			if tc.want == "" {
+				if v != nil {
+					t.Errorf("dev-credentials volume = %+v, want gone", v)
+				}
+				if m != nil {
+					t.Errorf("dev-credentials mount = %+v, want gone", m)
+				}
+			} else {
+				if v == nil || v.Secret == nil || v.Secret.SecretName != tc.want {
+					t.Errorf("dev-credentials volume = %+v, want Secret %q", v, tc.want)
+				}
+				if m == nil || m.MountPath != "/run/herdr/credentials" || !m.ReadOnly {
+					t.Errorf("dev-credentials mount = %+v, want read-only at /run/herdr/credentials", m)
+				}
+			}
+			if got.Spec.OperatingMode != v1beta1.SandboxOperatingModeSuspended {
+				t.Errorf("operatingMode = %q, want Suspended (suspend cycle)", got.Spec.OperatingMode)
+			}
+		})
+	}
+}
+
+// An unchanged credentials annotation must not touch the sandbox: no
+// patch, no suspend.
+func TestCredentialsUnchangedAnnotationIsNoOp(t *testing.T) {
+	pen := newPen()
+	pen.Spec.CPU = "4"
+	pen.Spec.Memory = "8Gi"
+	pen.Spec.TTL = "1h"
+	pen.Annotations = map[string]string{credentialsAnnotationKey: "model-keys"}
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 9, 0, 0, 0, time.UTC))
+	sb := sandboxWithCredentials("1h", &oldTime, "model-keys")
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sb}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, testConfig())
+	got := getSandbox(t, c)
+	if got.ResourceVersion != sb.ResourceVersion {
+		t.Errorf("sandbox updated on unchanged annotation: resourceVersion %q, want %q", got.ResourceVersion, sb.ResourceVersion)
+	}
+	if got.Spec.OperatingMode != v1beta1.SandboxOperatingModeRunning {
+		t.Errorf("operatingMode = %q, want Running (no mode change)", got.Spec.OperatingMode)
+	}
+}
+
+// The flip side of the convergence cycle: an unpaused pen, a Suspended
+// sandbox whose pod is gone, and a stored template that carries
+// dev-credentials. The reconcile flips the sandbox back to Running,
+// keeps the volume, and requeues so the pen observes the flip.
+func TestCredentialsSuspendCycleFlipsToRunning(t *testing.T) {
+	pen := newPen()
+	pen.Spec.CPU = "4"
+	pen.Spec.Memory = "8Gi"
+	pen.Spec.TTL = "1h"
+	pen.Annotations = map[string]string{credentialsAnnotationKey: "model-keys"}
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 7, 0, 0, 0, time.UTC))
+	sb := suspendedSandboxWithTTL("1h", &oldTime)
+	sb.Spec.PodTemplate.Spec.Containers = []corev1.Container{{
+		Name:      "env",
+		Resources: containerResources("4", "8Gi"),
+		VolumeMounts: []corev1.VolumeMount{{
+			Name: "dev-credentials", MountPath: "/run/herdr/credentials", ReadOnly: true,
+		}},
+	}}
+	optional := true
+	sb.Spec.PodTemplate.Spec.Volumes = []corev1.Volume{{
+		Name: "dev-credentials",
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{SecretName: "model-keys", Optional: &optional},
+		},
+	}}
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sb}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	res := reconcileOnceAt(t, c, devNS, testConfig(), time.Date(2026, 11, 24, 8, 0, 0, 0, time.UTC))
+	got := getSandbox(t, c)
+	if got.Spec.OperatingMode != v1beta1.SandboxOperatingModeRunning {
+		t.Errorf("operatingMode = %q, want Running after the flip", got.Spec.OperatingMode)
+	}
+	v := storedCredentialsVolume(got)
+	if v == nil || v.Secret == nil || v.Secret.SecretName != "model-keys" {
+		t.Errorf("dev-credentials volume = %+v, want kept with Secret model-keys", v)
+	}
+	if res.RequeueAfter != requeueCreating {
+		t.Errorf("RequeueAfter = %v, want %v so the flip is observed", res.RequeueAfter, requeueCreating)
+	}
+}
