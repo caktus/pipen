@@ -2125,3 +2125,80 @@ func TestCredentialsSuspendCycleFlipsToRunning(t *testing.T) {
 		t.Errorf("RequeueAfter = %v, want %v so the flip is observed", res.RequeueAfter, requeueCreating)
 	}
 }
+
+// A paused pen with a changed credentials annotation gets the podTemplate
+// patch only: the stored volume and mount follow the annotation, the
+// sandbox keeps its current Suspended mode, and the pen spec is untouched.
+// The change takes effect when the pen resumes. This is the credentials
+// twin of TestReconcilePausedPenGetsTemplateWithoutModeChange.
+func TestCredentialsPausedPenGetsTemplateWithoutModeChange(t *testing.T) {
+	pen := newPen()
+	pen.Spec.Paused = true
+	pen.Spec.CPU = "4"
+	pen.Spec.Memory = "8Gi"
+	pen.Spec.TTL = "1h"
+	pen.Annotations = map[string]string{credentialsAnnotationKey: "model-keys"}
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 9, 0, 0, 0, time.UTC))
+	sandbox := sandboxWithCredentials("1h", &oldTime, "")
+	sandbox.Spec.OperatingMode = v1beta1.SandboxOperatingModeSuspended
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, testConfig())
+	got := getSandbox(t, c)
+	v := storedCredentialsVolume(got)
+	if v == nil || v.Secret == nil || v.Secret.SecretName != "model-keys" {
+		t.Errorf("dev-credentials volume = %+v, want Secret model-keys", v)
+	}
+	m := storedCredentialsMount(got)
+	if m == nil || m.MountPath != "/run/herdr/credentials" || !m.ReadOnly {
+		t.Errorf("dev-credentials mount = %+v, want read-only at /run/herdr/credentials", m)
+	}
+	if got.Spec.OperatingMode != v1beta1.SandboxOperatingModeSuspended {
+		t.Errorf("operatingMode = %q, want Suspended (no mode change for a paused pen)", got.Spec.OperatingMode)
+	}
+	if p := getPen(t, c); p.Spec != pen.Spec {
+		t.Errorf("pen spec = %+v, want unchanged %+v", p.Spec, pen.Spec)
+	}
+}
+
+// A resource resize and a credentials annotation change in the same
+// reconcile land in one stored template and one suspend: both the new
+// resources and the new credentials volume are present after the pass,
+// the sandbox is Suspended, and a second pass is a no-op. This pins the
+// single-Update, no-oscillation behavior of the shared convergence path.
+func TestCredentialsAndResourcesDivergeInOneReconcile(t *testing.T) {
+	pen := newPen()
+	pen.Spec.CPU = "4"
+	pen.Spec.Memory = "8Gi"
+	pen.Spec.TTL = "1h"
+	pen.Annotations = map[string]string{credentialsAnnotationKey: "model-keys"}
+	oldTime := metav1.NewTime(time.Date(2026, 11, 24, 9, 0, 0, 0, time.UTC))
+	sandbox := sandboxWithEnvResources("1h", &oldTime, "2", "4Gi")
+	objs := append([]client.Object{ownedNS(t, devNS), pen, sandbox}, devObjects(devNS)...)
+	c := newClient(t, objs...)
+	reconcileOnceWith(t, c, devNS, testConfig())
+	got := getSandbox(t, c)
+	ctr := got.Spec.PodTemplate.Spec.Containers[0]
+	if ctr.Resources.Requests.Cpu().String() != "4" || ctr.Resources.Limits.Cpu().String() != "4" {
+		t.Errorf("cpu req/lim = %v/%v, want 4/4", ctr.Resources.Requests[corev1.ResourceCPU], ctr.Resources.Limits[corev1.ResourceCPU])
+	}
+	if ctr.Resources.Requests.Memory().String() != "8Gi" || ctr.Resources.Limits.Memory().String() != "8Gi" {
+		t.Errorf("memory req/lim = %v/%v, want 8Gi/8Gi", ctr.Resources.Requests[corev1.ResourceMemory], ctr.Resources.Limits[corev1.ResourceMemory])
+	}
+	v := storedCredentialsVolume(got)
+	if v == nil || v.Secret == nil || v.Secret.SecretName != "model-keys" {
+		t.Errorf("dev-credentials volume = %+v, want Secret model-keys", v)
+	}
+	m := storedCredentialsMount(got)
+	if m == nil || m.MountPath != "/run/herdr/credentials" || !m.ReadOnly {
+		t.Errorf("dev-credentials mount = %+v, want read-only at /run/herdr/credentials", m)
+	}
+	if got.Spec.OperatingMode != v1beta1.SandboxOperatingModeSuspended {
+		t.Errorf("operatingMode = %q, want Suspended (one suspend cycle)", got.Spec.OperatingMode)
+	}
+	reconcileOnceWith(t, c, devNS, testConfig())
+	again := getSandbox(t, c)
+	if again.ResourceVersion != got.ResourceVersion {
+		t.Errorf("sandbox updated on second pass: resourceVersion %q, want %q", again.ResourceVersion, got.ResourceVersion)
+	}
+}
