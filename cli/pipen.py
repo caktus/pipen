@@ -10,15 +10,17 @@ and tailnet Service up, reporting the result on Pen status. The dev
 token can no longer create raw (privileged) pods.
 
 Verbs:
-  up <name>    Create a Pen (spec: image/homeSize/cpu/memory) and wait
-               for status ready; print the ssh line from the
+  up <name>    Create a Pen (spec: image/homeSize/cpu/memory/ttl/egress)
+               and wait for status ready; print the ssh line from the
                operator-assigned tailnet hostname. The default image
                is the operator's config default; pin one with --image.
+  pause <name> Stop compute and keep the Pen, home PVC, and hostname.
+  resume <name> Resume a paused Pen and wait for Ready.
   ssh <name>   Resolve the hostname from Pen status and ssh in.
   down <name>  Delete the Pen. The operator's garbage collection removes
                the pod and Service; the home PVC and its data remain
                (admin wipe: kubectl -n <ns> delete pvc <name>-home).
-  ls           List Pens in the dev namespace (phase/node/hostname).
+  ls           List Pens in the dev namespace (phase/TTL/node/hostname).
   logs <name>  Stream the env pod logs.
 
 Env names are force-prefixed with your developer/namespace so the tailnet
@@ -48,6 +50,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 
 NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 PENS_GROUP = "pens.pipen.dev/v1alpha1"
@@ -165,11 +168,17 @@ def resolve_env(name: str, dev: str) -> str:
     return name
 
 
-def pen_spec(image: str, size: str, cpu: str, memory: str) -> dict:
+def pen_spec(
+    image: str, size: str, cpu: str, memory: str, ttl: str = "", egress: bool = False
+) -> dict:
     """Pen spec body; an empty image leaves the operator's default."""
     spec = {"homeSize": size, "cpu": cpu, "memory": memory}
     if image:
         spec["image"] = image
+    if ttl:
+        spec["ttl"] = ttl
+    if egress:
+        spec["egress"] = True
     return spec
 
 
@@ -209,7 +218,13 @@ def cmd_up(args, cfg, api) -> int:
     status, body = api.request(
         "POST",
         api.pens_path(ns),
-        pen_body(env, ns, pen_spec(args.image, args.size, args.cpu, args.memory)),
+        pen_body(
+            env,
+            ns,
+            pen_spec(
+                args.image, args.size, args.cpu, args.memory, args.ttl, args.egress
+            ),
+        ),
     )
     if status in (200, 201):
         print(f"pipen: created pen {env} (operator brings the env up)")
@@ -238,6 +253,38 @@ def cmd_up(args, cfg, api) -> int:
     return 0  # unreachable
 
 
+def set_paused(args, cfg, api, paused: bool, expected_phase: str) -> int:
+    ns, dev = cfg["namespace"], cfg["dev_user"]
+    env = validate_name(resolve_env(args.name, dev))
+    _, body = get_pen(api, ns, env)
+    body.setdefault("spec", {})["paused"] = paused
+    status, response = api.request("PUT", api.pens_path(ns, env), body)
+    if status != 200:
+        die(f"pen update failed: HTTP {status} {response}")
+    deadline = time.time() + args.timeout
+    while time.time() < deadline:
+        _, current = get_pen(api, ns, env)
+        f = pen_status_fields(current)
+        if f["phase"] == expected_phase:
+            print(f"pipen: pen {env} {expected_phase.lower()}")
+            return 0
+        info = f["phase"] + (f": {f['message']}" if f["message"] else "")
+        print(f"pipen: {env} {info} …", flush=True)
+        time.sleep(POLL_SECONDS)
+    die(
+        f"pen {env} not {expected_phase.lower()} within {args.timeout}s — `pipen ls` shows status"
+    )
+    return 0  # unreachable
+
+
+def cmd_pause(args, cfg, api) -> int:
+    return set_paused(args, cfg, api, True, "Suspended")
+
+
+def cmd_resume(args, cfg, api) -> int:
+    return set_paused(args, cfg, api, False, "Ready")
+
+
 def cmd_ssh(args, cfg, api) -> int:
     ns, dev = cfg["namespace"], cfg["dev_user"]
     env = validate_name(resolve_env(args.name, dev))
@@ -261,6 +308,24 @@ def cmd_down(args, cfg, api) -> int:
     return 0
 
 
+def now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def remaining_ttl(shutdown_at: str | None, current_time: datetime) -> str:
+    if not shutdown_at:
+        return "-"
+    shutdown_time = datetime.fromisoformat(shutdown_at.replace("Z", "+00:00"))
+    seconds = max(0, int((shutdown_time - current_time).total_seconds()))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h{minutes}m"
+    if minutes:
+        return f"{minutes}m"
+    return f"{seconds}s"
+
+
 def cmd_ls(args, cfg, api) -> int:
     ns = cfg["namespace"]
     status, body = api.request("GET", api.pens_path(ns))
@@ -270,12 +335,15 @@ def cmd_ls(args, cfg, api) -> int:
     if not items:
         print("(no herdr envs)")
         return 0
-    print(f"{'ENV':<24} {'PHASE':<10} {'NODE':<16} HOSTNAME")
+    print(f"{'ENV':<24} {'PHASE':<10} {'TTL':<10} {'NODE':<16} HOSTNAME")
+    current_time = now()
     for pen in items:
         env = pen["metadata"]["name"]
         f = pen_status_fields(pen)
+        ttl = remaining_ttl(pen.get("status", {}).get("shutdownAt"), current_time)
         print(
-            f"{env:<24} {f['phase']:<10} {f['node'] or '-':<16} {f['hostname'] or '-'}"
+            f"{env:<24} {f['phase']:<10} {ttl:<10} "
+            f"{f['node'] or '-':<16} {f['hostname'] or '-'}"
         )
     return 0
 
@@ -318,6 +386,30 @@ def main() -> int:
         default=1800,
         help="pen-ready timeout in seconds (default: 1800)",
     )
+    p_up.add_argument(
+        "--ttl", default="", help="time until the env shuts down, for example 8h"
+    )
+    p_up.add_argument(
+        "--egress", action="store_true", help="allow only approved network destinations"
+    )
+
+    p_pause = sub.add_parser("pause", help="pause env <name> (keeps the PVC + data)")
+    p_pause.add_argument("name")
+    p_pause.add_argument(
+        "--timeout",
+        type=int,
+        default=1800,
+        help="pen-suspended timeout in seconds (default: 1800)",
+    )
+
+    p_resume = sub.add_parser("resume", help="resume paused env <name>")
+    p_resume.add_argument("name")
+    p_resume.add_argument(
+        "--timeout",
+        type=int,
+        default=1800,
+        help="pen-ready timeout in seconds (default: 1800)",
+    )
 
     p_ssh = sub.add_parser("ssh", help="ssh into env <name> (hostname from Pen status)")
     p_ssh.add_argument("name")
@@ -338,6 +430,8 @@ def main() -> int:
     api = Api(cfg)
     return {
         "up": cmd_up,
+        "pause": cmd_pause,
+        "resume": cmd_resume,
         "ssh": cmd_ssh,
         "down": cmd_down,
         "ls": cmd_ls,
