@@ -54,10 +54,12 @@ docker.io direnv npm unzip`, uv, fnm, Node 24, and
 - Pause. `pipen pause <name>` stops the pen pod and keeps the Pen, the home
   PVC, and the tailnet hostname. `pipen resume <name>` starts the pod again
   with a fresh TTL
-- Idle shutdown. A TTL (a time limit, for example `8h`) shuts the pen down
-  when the window ends. Set one per pen with `pipen up --ttl 8h`, or set
-  the operator default (`operatorConfig.defaultTTL`). `pipen ls` shows the
-  remaining time
+- Auto shutdown after the window. A TTL (a time limit, for example `8h`)
+  shuts the pen down when the window ends. Set one per pen with
+  `pipen up --ttl 8h`, or set the operator default
+  (`operatorConfig.defaultTTL`). `pipen ls` shows the remaining time. An
+  expired pen that is not paused starts again on its own with a fresh TTL.
+  Pause it to keep it down
 - Egress hardening. `pipen up --egress` adds a NetworkPolicy for the pen.
   A NetworkPolicy filters a pod's network traffic. The policy allows only
   the hosts in the operator value `operatorConfig.egressHosts` and cluster
@@ -94,14 +96,14 @@ An admin bootstraps you once (see Admins) and gives you the
 
    ```sh
    pipen up myenv          # creates one Pen; the operator brings the env up
-   pipen up myenv --ttl 8h # the pen shuts itself down after 8h
+   pipen up myenv --ttl 8h # shuts down after 8h, then starts again with a fresh TTL
    pipen up myenv --egress # allow only the approved egress destinations
    pipen ssh myenv         # or: ssh <you>@<hostname> (hostname printed by up)
    pipen pause myenv       # stop the pod; the Pen, PVC and hostname stay
    pipen resume myenv      # start a paused pen again; the TTL starts fresh
    pipen ls                # pens: phase, TTL, node, hostname
    pipen logs myenv        # pod logs (entrypoint + sshd)
-   pipen down myenv        # deletes the Pen; the Sandbox, pod and Service go, the PVC survives
+   pipen down myenv        # deletes the Pen; the Sandbox, pod, Service and egress policy go, the PVC survives
    ```
 
    The pen starts on the operator's default image (see Admins). To pin
@@ -118,8 +120,9 @@ An admin bootstraps you once (see Admins) and gives you the
 
 ### What stays, and what does not
 
-- `pipen down <name>` removes the Pen, the Sandbox, the pod, and the tailnet
-  Service. The home PVC and its data stay
+- `pipen down <name>` removes the Pen, the Sandbox, the pod, the tailnet
+  Service, and the egress NetworkPolicy (when egress is on). The home PVC
+  and its data stay
 - `/home/<you>` lives on the persistent PVC. It survives `pipen down` + `up`, pod
   deletion, and node moves. The `WaitForFirstConsumer` volume re-attaches on
   a node that can attach the volume
