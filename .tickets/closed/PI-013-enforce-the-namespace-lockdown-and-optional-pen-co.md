@@ -2,14 +2,14 @@
 id: PI-013
 github_issue: 13
 github_url: https://github.com/caktus/pipen/issues/13
-last_synced: "2026-11-21T03:17:06.868509+00:00"
+last_synced: "2026-11-24T04:54:59.313733+00:00"
 synced_hash: 7399be0c01a1a5dfb7735b47cc19f9e90d55aca4336dbc2fdd8074959bcdde4d
 title: Enforce the namespace lockdown and optional pen config
 type: Bug
 assignee: "@me"
 labels:
   - priority/p1
-  - phase/review
+  - phase/done
 context:
   relates_to:
     - PI-010
