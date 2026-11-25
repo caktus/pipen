@@ -2,12 +2,12 @@
 id: PI-022
 github_issue: 22
 github_url: https://github.com/caktus/pipen/issues/22
-last_synced: "2026-11-24T23:59:39.866388+00:00"
+last_synced: "2026-11-25T00:04:33.375578+00:00"
 synced_hash: f5341e516aa7fe49e349845e0c7f71e317857d58c539c2508cb308f65603797b
 title: Record the CLI version in pen configs
 assignee: "@me"
 labels:
-  - phase/review
+  - phase/done
 context:
   relates_to: []
 ---
