@@ -3,6 +3,18 @@ entries:
   dev-namespace:
   - apiVersion: v2
     appVersion: 0.1.0
+    created: "2026-11-25T00:00:18.771349429Z"
+    description: Provisions a per-developer herdr dev namespace (Namespace + ServiceAccount
+      + ns-scoped RBAC + SA token + ssh-key secret)
+    digest: f85037d233f59ce424340bee289e75328383264112c360e1bf9b000242fcb869
+    home: https://github.com/caktus/pipen
+    name: dev-namespace
+    type: application
+    urls:
+    - dev-namespace-0.7.4.tgz
+    version: 0.7.4
+  - apiVersion: v2
+    appVersion: 0.1.0
     created: "2026-11-24T22:31:50.440259034Z"
     description: Provisions a per-developer herdr dev namespace (Namespace + ServiceAccount
       + ns-scoped RBAC + SA token + ssh-key secret)
@@ -225,4 +237,4 @@ entries:
     urls:
     - pipen-operator-0.1.0.tgz
     version: 0.1.0
-generated: "2026-11-24T23:24:31.450704447Z"
+generated: "2026-11-25T00:00:18.771422085Z"
