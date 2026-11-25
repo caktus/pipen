@@ -290,6 +290,72 @@ jobs:
             || { echo "key ssh landed in $home, want /home/probe" >&2; exit 1; }
           echo "key ssh OK: landed in $home"
           docker stop herdr-probe3 >/dev/null
+      - name: Boot probe with the skel dotfiles
+        run: |
+          # the entrypoint seeds the /etc/skel dotfiles into the dev home,
+          # and the ssh login shell must source .bashrc through the skel
+          # .profile. Three checks over a real key ssh:
+          #  - the dev user owns .profile and .bash_logout
+          #  - .bashrc carries the skel header line
+          #  - an interactive login shell sees the skel HISTSIZE 1000. The
+          #    skel .bashrc returns early in non-interactive shells, before
+          #    HISTSIZE, so this check runs a login shell on a real pty.
+          #    script(1) creates the pty inside the container, so the ssh
+          #    client needs no -t flag
+          work="$RUNNER_TEMP/probe5"
+          mkdir -p "$work/secret" "$work/config"
+          ssh-keygen -q -t ed25519 -N '' -f "$work/id_probe"
+          cp "$work/id_probe.pub" "$work/secret/authorized_keys"
+          docker run -d --name herdr-probe5 --privileged \
+            -e DEV_USER=probe \
+            -p 127.0.0.1:2222:22 \
+            -v "$work/secret":/run/herdr/secret \
+            -v "$work/config":/run/herdr/config \
+            -v herdr-probe5-home:/home \
+            pipen-herdr-dev:ci
+          for i in $(seq 1 60); do
+            docker exec herdr-probe5 pgrep -x sshd >/dev/null 2>&1 && break
+            sleep 2
+          done
+          docker exec herdr-probe5 pgrep -x sshd \
+            || { docker logs herdr-probe5 >&2; echo "sshd not running" >&2; exit 1; }
+          if ! ssh -i "$work/id_probe" -p 2222 \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -o BatchMode=yes probe@127.0.0.1 \
+            'test -f "$HOME/.profile" && test -f "$HOME/.bash_logout"'; then
+            docker logs herdr-probe5 >&2
+            echo "skel .profile or .bash_logout missing from the dev home" >&2
+            exit 1
+          fi
+          if ! owners="$(ssh -i "$work/id_probe" -p 2222 \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -o BatchMode=yes probe@127.0.0.1 \
+            'stat -c %U "$HOME/.profile" "$HOME/.bash_logout"')"; then
+            docker logs herdr-probe5 >&2
+            echo "key ssh as probe failed" >&2
+            exit 1
+          fi
+          [ "$owners" = "$(printf 'probe\nprobe')" ] \
+            || { echo "skel dotfiles not owned by probe: $owners" >&2; exit 1; }
+          if ! first_line="$(ssh -i "$work/id_probe" -p 2222 \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -o BatchMode=yes probe@127.0.0.1 'head -n 1 "$HOME/.bashrc"')"; then
+            docker logs herdr-probe5 >&2
+            echo "key ssh as probe failed" >&2
+            exit 1
+          fi
+          [ "$first_line" = "# ~/.bashrc: executed by bash(1) for non-login shells." ] \
+            || { echo ".bashrc first line = $first_line, want the skel header" >&2; exit 1; }
+          hist_out="$(printf 'echo MARK_HISTSIZE=[$HISTSIZE]\n' | \
+            ssh -i "$work/id_probe" -p 2222 \
+              -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              -o BatchMode=yes probe@127.0.0.1 'script -qec "bash -il" /dev/null' \
+            2>&1)" \
+            || { docker logs herdr-probe5 >&2; echo "login shell probe failed" >&2; exit 1; }
+          echo "$hist_out" | grep -q 'MARK_HISTSIZE=\[1000\]' \
+            || { echo "$hist_out" >&2; echo "login shell did not see the skel HISTSIZE 1000" >&2; exit 1; }
+          echo "skel dotfiles OK over key ssh"
+          docker stop herdr-probe5 >/dev/null
       - name: Boot probe with credentials
         run: |
           # two boots on one /home volume. Boot 1 projects a credentials
@@ -384,10 +450,10 @@ jobs:
           # best effort: a probe that failed early leaves no container or
           # volume behind, so ignore the errors
           docker rm -f herdr-probe1 herdr-probe2a herdr-probe2b herdr-probe3 \
-            herdr-probe4a herdr-probe4b \
+            herdr-probe4a herdr-probe4b herdr-probe5 \
             >/dev/null 2>&1 || true
           docker volume rm herdr-probe1-home herdr-probe2-home herdr-probe3-home \
-            herdr-probe4-home \
+            herdr-probe4-home herdr-probe5-home \
             >/dev/null 2>&1 || true
 
   e2e:

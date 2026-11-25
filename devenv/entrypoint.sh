@@ -51,6 +51,24 @@ usermod -aG docker "${DEV_USER}"
 # journal read without sudo: the journal files are root:systemd-journal
 usermod -aG systemd-journal "${DEV_USER}"
 install -d -m 700 "${DEV_HOME}"
+# Seed the /etc/skel dotfiles into the home. useradd -M skips the skel copy
+# because /home is the mounted volume and the home dir is created by hand
+# above. No clobber: an entry the user already has is never touched, so an
+# edited file survives every boot and a pen created before this fix gains
+# the missing dotfiles on its next boot. The chown -R below picks up
+# ownership of the copied entries.
+# nullglob keeps a missing /etc/skel a no-op; dotglob keeps the dotfiles
+shopt -s nullglob dotglob
+for src in /etc/skel/*; do
+    dest="${DEV_HOME}/${src##*/}"
+    # no clobber: an existing entry (file, dir, or a dangling link) is the
+    # user's and stays untouched
+    if [ -e "${dest}" ] || [ -L "${dest}" ]; then
+        continue
+    fi
+    cp -a "${src}" "${dest}"
+done
+shopt -u nullglob dotglob
 chown -R "${DEV_USER}:${DEV_USER}" "${DEV_HOME}"
 
 # Note: /opt/pi (pi's npm prefix) is world-writable in the image (see
