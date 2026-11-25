@@ -256,3 +256,10 @@ the `pens.pipen.dev/credentials` annotation to its own pen with
 `kubectl`. The verb is a partial update. It adds no state the token
 cannot already set with `update`. On upgrade, no pen changes. The
 upgrade is a plain `helm upgrade`.
+
+## 0.7.4 docs only
+
+The `NOTES.txt` step 3 now points the admin at the `pipen config`
+command instead of a hand-written config file, and drops the removed
+`tailnet_domain` key. No rendered object changed. The upgrade is a
+plain `helm upgrade`.

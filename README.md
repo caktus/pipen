@@ -478,25 +478,59 @@ files. The ConfigMap path is unchanged for non-sensitive values.
 
 ### 5. Hand the CLI configuration to the developer
 
-Read the token and write `.herdr-<dev>.yaml` (0600, never committed):
+Read the token. Then generate `.herdr-<dev>.yaml` with the CLI (the
+installed CLI, or the bare script from a checkout). Run the command
+once per developer:
 
 ```sh
 kubectl -n env-<dev> get secret deploy-token -o jsonpath='{.data.token}' | base64 -d
 ```
 
-```yaml
-api_base: https://<cluster-api-host>:<port> # e.g. the tailnet API address
-namespace: env-<dev> # the composed name, namespacePrefix + dev
-dev_user: <dev> # the bare dev
-token: <sa-token>
+```sh
+pipen config --out .herdr-<dev>.yaml \
+  --api-base https://<cluster-api-host>:<port> \
+  --namespace env-<dev> \
+  --dev-user <dev> \
+  --token <sa-token>
 ```
 
-The config also takes an optional `image` key. Write it with the same
-value as the operator chart's `config.image`. With the key, `pipen up`
-makes sure that the default image tag is pinned and warns when it is
-`latest` or has no tag. Without the key and without `--image`, the
-image is the operator default. `pipen up` warns that the CLI cannot
-make sure that it is pinned.
+Bare from a checkout: `python3 cli/pipen.py config` with the same
+flags.
+
+The command refuses to overwrite an existing file. The file carries
+the token, so set its mode before you hand it over. Never commit it:
+
+```sh
+chmod 600 .herdr-<dev>.yaml
+```
+
+The file records `cli_version`, the version of the CLI that wrote it.
+The optional `--image`, `--operator-version` and `--chart-version`
+flags add their keys. An example with all three:
+
+```sh
+pipen config --out .herdr-<dev>.yaml \
+  --api-base https://<cluster-api-host>:<port> \
+  --namespace env-<dev> \
+  --dev-user <dev> \
+  --token <sa-token> \
+  --image ghcr.io/caktus/pipen:20261124-pi1.6.0 \
+  --operator-version 20261124 \
+  --chart-version 0.7.4
+```
+
+- `image`: the same value as the operator chart's `config.image`. With
+  the key, `pipen up` checks that the default image tag is pinned
+  and warns when it is `latest` or has no tag. Without the key and
+  without `--image`, the image is the operator default. `pipen up`
+  warns that the CLI cannot make sure that it is pinned
+- `operator_version`: the operator image tag (a UTC date, or `latest`)
+- `chart_version`: the dev-namespace chart version, the chart
+  installed for the pen namespace
+
+The CLI never rewrites the file. A pen made with an older CLI keeps
+showing that older CLI's version in its config. You read the versions
+to tell which toolchain made a pen.
 
 ### Revoke a developer
 

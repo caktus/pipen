@@ -15,5 +15,6 @@ Next steps (admin, see README.md):
   2. Create the ConfigMap herdr-dev-{{ include "dev-namespace.name" . }} with the dev image
      tag, the rendered agent config, and the developer's LLM-proxy key
      (cluster-tooling-specific, not part of this chart).
-  3. Write the developer's CLI config (api_base, namespace, dev_user,
-     tailnet_domain, token) and hand it to the developer.
+  3. Generate the developer's CLI config with `pipen config --out
+     .herdr-<dev>.yaml --api-base ... --namespace ... --dev-user ...
+     --token ...` and hand the file to the developer.

@@ -702,12 +702,16 @@ jobs:
           [ -n "$server" ] || { echo "kind cluster server not found in the kubeconfig" >&2; exit 1; }
           token=$(python3 -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["users"][0]["user"]["token"])' "$DEV_KUBECONFIG")
           [ -n "$token" ] || { echo "dev token not found in $DEV_KUBECONFIG" >&2; exit 1; }
-          cat > "$RUNNER_TEMP/pipen-e2e.yaml" <<EOF
-          api_base: $server
-          namespace: env-ci
-          dev_user: ci
-          token: $token
-          EOF
+          python3 cli/pipen.py config --out "$RUNNER_TEMP/pipen-e2e.yaml" \
+            --api-base "$server" \
+            --namespace env-ci \
+            --dev-user ci \
+            --token "$token"
+          # The generated file must carry cli_version. The CLI unit
+          # tests cover the optional --image, --operator-version,
+          # --chart-version flags
+          grep -q '^cli_version: ' "$RUNNER_TEMP/pipen-e2e.yaml" \
+            || { echo "config has no cli_version" >&2; exit 1; }
           PIPEN_CONFIG="$RUNNER_TEMP/pipen-e2e.yaml" \
             python3 cli/pipen.py resize ci-smoke \
             --cpu 200m --memory 256Mi --timeout 300
