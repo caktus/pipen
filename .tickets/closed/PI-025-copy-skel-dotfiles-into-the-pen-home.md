@@ -2,8 +2,8 @@
 id: PI-025
 github_issue: 25
 github_url: https://github.com/caktus/pipen/issues/25
-last_synced: "2026-11-25T01:34:24.185812+00:00"
-synced_hash: 9cad8d4383f692d46b5cb99e60aa9e32ebf913fa6fba2fcaa84c4b9ff0077672
+last_synced: "2026-11-25T01:34:39.614577+00:00"
+synced_hash: 9490c49df6e62513e2ed9f3bd6bf93e76fc4f22ba2a6ca8fbfbe0bb237a78c3b
 title: Copy skel dotfiles into the pen home
 type: Bug
 assignee: "@me"
