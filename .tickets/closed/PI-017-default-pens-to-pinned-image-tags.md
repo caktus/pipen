@@ -2,8 +2,8 @@
 id: PI-017
 github_issue: 20
 github_url: https://github.com/caktus/pipen/issues/20
-last_synced: "2026-11-24T23:29:11.489737+00:00"
-synced_hash: a9a322a33d3f52c9735b4994031e2f3d8b584310787afa62ad01efc44b142b51
+last_synced: "2026-11-25T00:05:01.555187+00:00"
+synced_hash: c05758f6a9f0d80569ced57f621dfbb88141ea3b2d6c7c75da58eb7fab715cd8
 title: Default pens to pinned image tags
 assignee: "@me"
 labels:
